@@ -113,13 +113,17 @@ def build(cfg: Config):
         instructions=(
             f"You are talking to the machine '{cfg.self_name}', where the Rogue-Lite game "
             f"client and the Sluzzygames server source both live.\n\n"
+            f"CALL bridge_capabilities() FIRST. It lists every tool, the live WebSocket "
+            f"subscription that removes the need to poll, the REST fallback, and the "
+            f"hazards that have already caused false diagnoses here.\n\n"
             f"Use bridge_send to ask the agent here a question; it is delivered live and "
-            f"also queued, so it survives that agent being mid-turn. Poll bridge_inbox for "
-            f"replies addressed to you.\n\n"
+            f"also persisted to disk, so it survives that agent being mid-turn AND this "
+            f"server restarting. Poll bridge_inbox for replies, or subscribe to /notify "
+            f"and be told instead.\n\n"
             f"Most questions do not need a human or another agent: bridge_read and "
-            f"bridge_grep expose both source trees directly, and for the viewer-avatar path "
-            f"specifically, avatar_contract and avatar_probe answer 'do the two sides still "
-            f"agree on the byte count' without anyone reading code."
+            f"bridge_grep expose both source trees, logs_read serves the game's engine.log "
+            f"(with staleness warnings), and avatar_contract/avatar_probe answer 'do the "
+            f"two sides still agree on the byte count' without anyone reading code."
         ),
     )
 
@@ -172,6 +176,76 @@ def build(cfg: Config):
     def bridge_peers() -> dict:
         """Which agents have used this bridge, and what is waiting for each."""
         return {"peers": box.peers(), "self": cfg.self_name}
+
+    @mcp.tool()
+    async def bridge_capabilities() -> dict:
+        """Everything this bridge offers: tools, live subscription, REST, hazards.
+
+        Start here. The tool list is derived from what is actually registered
+        rather than hand-maintained, so it cannot drift from reality.
+        """
+        registered = await mcp.list_tools()
+        groups: dict[str, list] = {}
+        for t in registered:
+            group = ("mailbox" if t.name.startswith("bridge_") and
+                     t.name.split("_")[1] in ("send", "inbox", "history", "peers",
+                                              "whoami", "capabilities")
+                     else "source" if t.name in ("bridge_read", "bridge_grep",
+                                                 "bridge_list", "bridge_roots")
+                     else "execution" if t.name in ("bridge_run", "bridge_commands")
+                     else "logs" if t.name.startswith("logs_")
+                     else "avatar" if t.name.startswith("avatar_")
+                     else "other")
+            groups.setdefault(group, []).append({
+                "name": t.name,
+                "purpose": (t.description or "").strip().splitlines()[0],
+            })
+
+        host = f"{cfg.self_name} ({cfg.host}:{cfg.port})"
+        return {
+            "self": cfg.self_name,
+            "endpoint_host": host,
+            "tools": groups,
+            "live_subscription": {
+                "what": "A WebSocket that pushes each message addressed to you as "
+                        "ONE text frame, so you are told rather than polling "
+                        "bridge_inbox. Any peer may subscribe under any agent name.",
+                "url": f"ws://<this-host>:{cfg.port}/notify?agent=<your-name>&token=<token>",
+                "note": "The token goes in the query string because a WebSocket "
+                        "client config has nowhere to put a header. Unread "
+                        "messages are replayed on connect, so subscribing late "
+                        "does not miss what prompted you to connect. There is no "
+                        "application keepalive by design - every text frame is a "
+                        "real message.",
+                "in_claude_code": "Monitor(ws={url: '...'}, persistent: true)",
+            },
+            "rest": {
+                "GET  /api/health": "unauthenticated; reports host_seen, host_allowed, "
+                                    "your_address - use it to tell a firewall problem "
+                                    "from a token problem from a Host-allowlist 421",
+                "GET  /api/inbox?agent=&limit=&peek=": "same mailbox",
+                "POST /api/send": '{"sender","to","text","thread"}',
+                "GET  /api/peers": "who has used this bridge",
+                "why": "An agent already mid-session cannot gain a new MCP server "
+                       "without restarting, but it can always shell out to curl.",
+            },
+            "roots": {k: str(v) for k, v in cfg.roots.items()},
+            "commands": sorted(cfg.commands) if cfg.exec_enabled else [],
+            "peers": box.peers(),
+            "hazards": [
+                "BACKSLASHES: Windows paths have been corrupted repeatedly in "
+                "messages through this bridge (\\a and \\t eaten as escapes), which "
+                "caused a real false diagnosis. Send paths with forward slashes, or "
+                "JSON-escape them. Never trust a pasted Windows path here.",
+                "STALE BUILDS: an absent engine.log usually means the binary predates "
+                "Log.Path, not that a subsystem is silent. logs_list reports "
+                "builds_without_engine_log and compares each log to the exe beside "
+                "it - read those fields before concluding anything from an absence.",
+                "ANY PEER CAN READ ANY MAILBOX: the token authorises use of the "
+                "bridge, not an identity. Subscribing or reading as another agent's "
+                "name is not prevented. Do not put secrets in messages.",
+            ],
+        }
 
     # --- read-only source access -------------------------------------------
 
