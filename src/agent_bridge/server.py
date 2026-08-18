@@ -1,0 +1,307 @@
+#
+#  agent-bridge-mcp - Copyright(c) 2026
+#
+
+# One process, one port, three surfaces:
+#
+#   /mcp      streamable-HTTP MCP, for Claude Code on another machine
+#   /notify   WebSocket, one text frame per message, for a live listener
+#   /api/*    plain REST, the same mailbox
+#
+# The REST surface is not redundant with MCP. An agent already mid-session
+# cannot gain a new MCP server without restarting, but it can always shell out
+# to curl - so /api is how the agent on THIS machine answers a message the
+# moment the bridge comes up, rather than after a restart.
+#
+# Auth: bearer token on HTTP. The WebSocket takes it as a query parameter
+# instead, because the client that consumes /notify configures a URL and has
+# nowhere to put a header. That is a real weakening (URLs land in logs), and it
+# is why this binds to a LAN address and not to the internet.
+
+import argparse
+import asyncio
+import hmac
+import logging
+
+import uvicorn
+from mcp.server.fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
+
+from agent_bridge.avatar import Avatars
+from agent_bridge.config import Config
+from agent_bridge.execute import ExecDenied, Runner
+from agent_bridge.files import Files, PathDenied
+from agent_bridge.mailbox import Mailbox
+
+log = logging.getLogger("agent-bridge")
+
+OPEN_PATHS = ("/api/health",)
+
+
+def build(cfg: Config):
+    box = Mailbox(capacity=int(cfg.inbox_max))
+    files = Files(cfg.roots, int(cfg.max_read_bytes))
+    runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
+    avatars = Avatars(cfg.gifterboard, cfg.roots)
+
+    mcp = FastMCP(
+        name=f"agent-bridge@{cfg.self_name}",
+        instructions=(
+            f"You are talking to the machine '{cfg.self_name}', where the Rogue-Lite game "
+            f"client and the Sluzzygames server source both live.\n\n"
+            f"Use bridge_send to ask the agent here a question; it is delivered live and "
+            f"also queued, so it survives that agent being mid-turn. Poll bridge_inbox for "
+            f"replies addressed to you.\n\n"
+            f"Most questions do not need a human or another agent: bridge_read and "
+            f"bridge_grep expose both source trees directly, and for the viewer-avatar path "
+            f"specifically, avatar_contract and avatar_probe answer 'do the two sides still "
+            f"agree on the byte count' without anyone reading code."
+        ),
+    )
+
+    # --- mailbox -----------------------------------------------------------
+
+    @mcp.tool()
+    def bridge_whoami() -> dict:
+        """Identify this machine and summarise what the bridge exposes."""
+        return {
+            "self_name": cfg.self_name,
+            "roots": {k: str(v) for k, v in cfg.roots.items()},
+            "exec_enabled": cfg.exec_enabled,
+            "commands": sorted(cfg.commands),
+            "gifterboard_url": avatars.url or "(unset)",
+            "peers": box.peers(),
+        }
+
+    @mcp.tool()
+    def bridge_send(to: str, text: str, sender: str = "", thread: str = "") -> dict:
+        """Send a message to an agent on another machine.
+
+        Delivered live to any listener and queued durably, so it is read even if
+        the recipient was mid-turn. Name yourself in `sender` so a reply can be
+        addressed back. Use `thread` to keep one investigation together.
+        """
+        try:
+            msg = box.post(sender or "remote", to, text, thread)
+        except ValueError as e:
+            return {"error": str(e)}
+        return {"sent": True, "id": msg.id, "to": msg.to, "sender": msg.sender,
+                "queued_for_recipient": box.unread_count(msg.to)}
+
+    @mcp.tool()
+    def bridge_inbox(agent: str, limit: int = 20, peek: bool = False, thread: str = "") -> dict:
+        """Read unread messages addressed to `agent`, marking them read.
+
+        Pass peek=true to look without consuming.
+        """
+        msgs = box.inbox(agent, limit=limit, peek=peek, thread=thread)
+        return {"agent": agent, "count": len(msgs),
+                "still_unread": box.unread_count(agent),
+                "messages": [m.as_dict() for m in msgs]}
+
+    @mcp.tool()
+    def bridge_history(agent: str = "", limit: int = 50, thread: str = "") -> dict:
+        """Recent traffic, read or not, for context on an ongoing thread."""
+        return {"messages": [m.as_dict() for m in box.history(agent, limit, thread)]}
+
+    @mcp.tool()
+    def bridge_peers() -> dict:
+        """Which agents have used this bridge, and what is waiting for each."""
+        return {"peers": box.peers(), "self": cfg.self_name}
+
+    # --- read-only source access -------------------------------------------
+
+    @mcp.tool()
+    def bridge_roots() -> dict:
+        """The source trees readable through this bridge."""
+        return {"roots": {k: str(v) for k, v in cfg.roots.items()},
+                "usage": "Address files as 'root:relative/path', e.g. "
+                         "'rogue-lite:game/live/ViewerRegistry.cs'."}
+
+    @mcp.tool()
+    def bridge_list(root: str = "", glob: str = "**/*", limit: int = 200) -> dict:
+        """List files in a configured root, filtered by glob."""
+        return files.list(root, glob, limit)
+
+    @mcp.tool()
+    def bridge_read(path: str, start: int = 1, count: int = 0) -> dict:
+        """Read a file as numbered lines. Address it as 'root:relative/path'.
+
+        `start`/`count` read a slice, which is required for large files.
+        """
+        try:
+            return files.read(path, start, count)
+        except (PathDenied, OSError) as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    def bridge_grep(pattern: str, root: str = "", glob: str = "", limit: int = 100,
+                    context: int = 0, ignore_case: bool = False) -> dict:
+        """Search the configured roots with a regular expression (ripgrep)."""
+        return files.grep(pattern, root, glob, limit, context, ignore_case)
+
+    # --- allowlisted execution ---------------------------------------------
+
+    @mcp.tool()
+    def bridge_commands() -> dict:
+        """The commands this bridge will run, and where each runs."""
+        return {"enabled": cfg.exec_enabled, "commands": runner.describe()}
+
+    @mcp.tool()
+    async def bridge_run(name: str, args: list[str] | None = None, root: str = "") -> dict:
+        """Run one allowlisted command by name and return its output.
+
+        `name` must come from bridge_commands. You cannot compose a command line;
+        `args` appends a small number of plain values where the entry allows it.
+        """
+        try:
+            return await runner.run(name, args, root)
+        except ExecDenied as e:
+            return {"error": str(e)}
+
+    # --- avatar / decode probes --------------------------------------------
+
+    @mcp.tool()
+    def avatar_contract() -> dict:
+        """Compare the avatar byte contract as written on BOTH sides.
+
+        Reads AvatarSize from ViewerRegistry.cs and AVATAR_SIZE from game-feed.js
+        and reports whether they still agree. A disagreement is silent at runtime.
+        """
+        return avatars.expectations()
+
+    @mcp.tool()
+    async def avatar_probe(uid: str, size: int = 0, creator: str = "") -> dict:
+        """Fetch one viewer's avatar from the running server and judge the bytes.
+
+        Reports the received length against the length the game requires, what
+        the body actually looks like if it is wrong, and whether the pixels are
+        blank or transparent if it is right.
+        """
+        try:
+            return await avatars.probe(uid, size, creator)
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    @mcp.tool()
+    async def avatar_png(uid: str, out_path: str, size: int = 0, creator: str = "") -> dict:
+        """Write a viewer's decoded avatar to a PNG so it can be looked at."""
+        try:
+            return await avatars.to_png(uid, out_path, size, creator)
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    # --- HTTP app ----------------------------------------------------------
+
+    def authorised(request_or_ws) -> bool:
+        if not cfg.token:
+            return True
+        header = request_or_ws.headers.get("authorization", "")
+        supplied = header[7:] if header.lower().startswith("bearer ") else ""
+        supplied = supplied or request_or_ws.query_params.get("token", "")
+        return hmac.compare_digest(supplied, cfg.token)
+
+    class Auth(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if request.url.path in OPEN_PATHS or authorised(request):
+                return await call_next(request)
+            return JSONResponse({"error": "bad or missing token"}, status_code=401)
+
+    async def health(request: Request):
+        return JSONResponse({"ok": True, "self": cfg.self_name,
+                             "peers": box.peers(), "roots": sorted(cfg.roots)})
+
+    async def api_send(request: Request):
+        body = await request.json()
+        try:
+            msg = box.post(body.get("sender", "local"), body.get("to", ""),
+                           body.get("text", ""), body.get("thread", ""))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({"sent": True, "id": msg.id})
+
+    async def api_inbox(request: Request):
+        q = request.query_params
+        peek = q.get("peek", "0") not in ("0", "", "false")
+        msgs = box.inbox(q.get("agent", cfg.self_name), int(q.get("limit", 20)),
+                         peek, q.get("thread", ""))
+        return JSONResponse({"count": len(msgs), "messages": [m.as_dict() for m in msgs]})
+
+    async def api_peers(request: Request):
+        return JSONResponse({"peers": box.peers()})
+
+    async def notify(ws: WebSocket):
+        if not authorised(ws):
+            await ws.close(code=4401)
+            return
+        agent = (ws.query_params.get("agent") or cfg.self_name).lower()
+        await ws.accept()
+        q = box.subscribe(agent)
+
+        # Anything already waiting is replayed first, so connecting late does not
+        # mean missing the message that prompted someone to connect.
+        backlog = box.inbox(agent, limit=20, peek=True)
+        try:
+            for m in backlog:
+                await ws.send_text(_frame(m, pending=True))
+            # No application-level keepalive on purpose. Every text frame this
+            # socket sends becomes a notification in the listening agent's
+            # session, so a heartbeat would interrupt it on a timer for no
+            # information. uvicorn sends protocol-level pings already, which
+            # keep the connection alive without waking anyone.
+            while True:
+                await ws.send_text(_frame(await q.get()))
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            box.unsubscribe(agent, q)
+
+    app = mcp.streamable_http_app()
+    app.routes.append(WebSocketRoute("/notify", notify))
+    app.routes.append(Route("/api/health", health, methods=["GET"]))
+    app.routes.append(Route("/api/send", api_send, methods=["POST"]))
+    app.routes.append(Route("/api/inbox", api_inbox, methods=["GET"]))
+    app.routes.append(Route("/api/peers", api_peers, methods=["GET"]))
+    app.add_middleware(Auth)
+    return app
+
+
+def _frame(msg, pending: bool = False) -> str:
+    # One line of prose first: whatever consumes this shows the frame to a human
+    # or to a model, and a bare JSON blob buries the actual question.
+    head = f"[bridge] {msg.sender} -> {msg.to}"
+    if msg.thread:
+        head += f" ({msg.thread})"
+    if pending:
+        head += " [unread backlog]"
+    return f"{head}: {msg.text}"
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="agent-bridge-mcp")
+    ap.add_argument("--config", default=None)
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--port", type=int, default=None)
+    args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
+    cfg = Config.load(args.config)
+    if not cfg.token:
+        log.warning("no token set - every peer on the LAN can use this bridge")
+
+    host = args.host or cfg.host
+    port = args.port or int(cfg.port)
+    log.info("agent-bridge '%s' on http://%s:%d  (mcp=/mcp  ws=/notify  rest=/api)",
+             cfg.self_name, host, port)
+    for name, path in cfg.roots.items():
+        log.info("  root %-14s %s", name, path)
+
+    uvicorn.run(build(cfg), host=host, port=port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

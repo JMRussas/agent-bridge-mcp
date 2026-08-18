@@ -1,0 +1,32 @@
+{
+  "self_name": "fenrir",
+  "host": "0.0.0.0",
+  "port": 8791,
+  "token": "CHANGE_ME",
+  "roots": {
+    "rogue-lite": "D:/Git/Rogue-Lite",
+    "sluzzygames": "D:/Git/Sluzzygames"
+  },
+  "max_read_bytes": 262144,
+  "inbox_max": 200,
+  "exec": {
+    "enabled": true,
+    "timeout": 300,
+    "commands": {
+      "viewers":     { "root": "rogue-lite",  "argv": ["dotnet", "run", "--project", "platform/cli", "--", "viewers"] },
+      "autoplay":    { "root": "rogue-lite",  "argv": ["dotnet", "run", "--project", "platform/cli", "--", "autoplay"], "max_args": 2 },
+      "build":       { "root": "rogue-lite",  "argv": ["dotnet", "build", "RogueLite.sln"] },
+      "git-status":  { "root": "*",           "argv": ["git", "status", "--short", "--branch"] },
+      "git-log":     { "root": "*",           "argv": ["git", "log", "--oneline", "-20"] },
+      "git-diff":    { "root": "*",           "argv": ["git", "diff", "--stat"] },
+      "node-check":  { "root": "sluzzygames", "argv": ["node", "--check", "game-feed.js"] },
+      "ffmpeg-ver":  { "root": "*",           "argv": ["ffmpeg", "-hide_banner", "-version"] }
+    }
+  },
+  "gifterboard": {
+    "url": "http://localhost:3002",
+    "creator": "",
+    "token": "",
+    "avatar_size": 64
+  }
+}
