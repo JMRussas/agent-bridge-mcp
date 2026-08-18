@@ -16,6 +16,7 @@ DEFAULTS = {
     "port": 8791,
     "token": "",
     "roots": {},
+    "allowed_hosts": [],
     "max_read_bytes": 256 * 1024,
     "inbox_max": 200,
     "exec": {"enabled": False, "timeout": 300, "commands": {}},

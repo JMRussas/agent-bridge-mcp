@@ -179,3 +179,29 @@ def test_rgba_to_png_round_trips_through_zlib():
     # Each row is one filter byte followed by the row's pixels.
     assert len(raw) == h * (1 + w * 4)
     assert raw[1:5] == bytes([200, 100, 50, 255])
+
+
+# --- MCP transport host allowlist ------------------------------------------
+#
+# Regression: the SDK's DNS-rebinding protection defaults to an EMPTY allowlist,
+# which answers every non-localhost request with 421 Misdirected Request. Our own
+# /api routes sit outside that middleware and keep working, so the server looks
+# half-up from another machine - health responds, MCP does not.
+
+from agent_bridge.config import Config
+from agent_bridge.server import allowed_hosts
+
+
+def test_derived_allowlist_covers_localhost_and_this_machine():
+    hosts = allowed_hosts(Config({}))
+    assert "localhost:*" in hosts
+    assert "127.0.0.1:*" in hosts
+    # Every entry allows any port, so moving the port cannot silently re-break it.
+    assert all(h.endswith(":*") for h in hosts), hosts
+    # Something beyond loopback must be present, or a remote peer still 421s.
+    assert any(not h.startswith(("localhost", "127.")) for h in hosts), hosts
+
+
+def test_configured_allowlist_wins():
+    hosts = allowed_hosts(Config({"allowed_hosts": ["example.internal:*"]}))
+    assert hosts == ["example.internal:*"]

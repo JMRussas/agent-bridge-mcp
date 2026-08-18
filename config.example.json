@@ -3,6 +3,9 @@
   "host": "0.0.0.0",
   "port": 8791,
   "token": "CHANGE_ME",
+
+  "//allowed_hosts": "Host headers the MCP transport will accept. Leave empty to derive this machine's names and IPs automatically. The SDK's own default is an EMPTY allowlist, which rejects everything but localhost with 421 Misdirected Request.",
+  "allowed_hosts": [],
   "roots": {
     "rogue-lite": "D:/Git/Rogue-Lite",
     "sluzzygames": "D:/Git/Sluzzygames"

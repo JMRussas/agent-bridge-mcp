@@ -22,9 +22,11 @@ import argparse
 import asyncio
 import hmac
 import logging
+import socket
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -42,14 +44,54 @@ log = logging.getLogger("agent-bridge")
 OPEN_PATHS = ("/api/health",)
 
 
+# The MCP transport carries its own DNS-rebinding protection, which validates the
+# Host header against an allowlist that is EMPTY by default. That default rejects
+# every request that did not arrive as "localhost" with 421 Misdirected Request,
+# while our own /api routes - which sit outside that middleware - keep answering.
+# The result is a server that looks half-up from another machine: health responds,
+# MCP does not. Hence deriving the allowlist rather than leaving it empty, and
+# logging it at startup so a 421 is one glance to diagnose.
+def allowed_hosts(cfg: Config) -> list[str]:
+    configured = list(getattr(cfg, "allowed_hosts", []) or [])
+    if configured:
+        return configured
+
+    names = {"localhost", "127.0.0.1"}
+    try:
+        hostname = socket.gethostname()
+        names.add(hostname.lower())
+        # A peer may address this box by its router-suffixed FQDN rather than by
+        # IP, which is a different Host header and would otherwise 421.
+        names.add(socket.getfqdn(hostname).lower())
+        canonical, aliases, addresses = socket.gethostbyname_ex(hostname)
+        names.add(canonical.lower())
+        names.update(a.lower() for a in aliases)
+        names.update(addresses)
+    except OSError:
+        pass
+
+    # ":*" allows any port, so moving the bridge's port does not silently break
+    # the allowlist and reintroduce exactly this bug.
+    return sorted(f"{n}:*" for n in names if n)
+
+
 def build(cfg: Config):
     box = Mailbox(capacity=int(cfg.inbox_max))
     files = Files(cfg.roots, int(cfg.max_read_bytes))
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     avatars = Avatars(cfg.gifterboard, cfg.roots)
 
+    hosts = allowed_hosts(cfg)
     mcp = FastMCP(
         name=f"agent-bridge@{cfg.self_name}",
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=hosts,
+            # Origin is absent on a Claude Code request; the middleware passes an
+            # absent Origin, so an empty list here is permissive-by-absence, not
+            # a block on legitimate clients.
+            allowed_origins=[],
+        ),
         instructions=(
             f"You are talking to the machine '{cfg.self_name}', where the Rogue-Lite game "
             f"client and the Sluzzygames server source both live.\n\n"
@@ -299,6 +341,7 @@ def main() -> None:
              cfg.self_name, host, port)
     for name, path in cfg.roots.items():
         log.info("  root %-14s %s", name, path)
+    log.info("  allowed Host headers: %s", ", ".join(allowed_hosts(cfg)))
 
     uvicorn.run(build(cfg), host=host, port=port, log_level="warning")
 

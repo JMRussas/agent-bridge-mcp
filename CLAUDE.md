@@ -151,6 +151,22 @@ editing that file and re-running `claude mcp add` on every peer.
 
 ## Gotchas
 
+- **The MCP transport has its own Host allowlist, and the SDK's default is
+  empty.** `TransportSecurityMiddleware` (DNS-rebinding protection) answers every
+  request whose `Host` header is not on the list with **421 Misdirected
+  Request** — and it wraps only the MCP route. `/api/*` sits outside it and keeps
+  answering, so from another machine the server looks *half up*: health responds,
+  MCP does not, and the peer reports "health is the only endpoint I can see."
+  `allowed_hosts()` derives this machine's names, FQDN and IPs at startup and
+  logs them; override with `allowed_hosts` in `config.json`. Every entry uses the
+  `:*` any-port form so changing the port cannot silently re-break it.
+  Diagnose with:
+  ```powershell
+  curl -i -X POST http://<host>:8791/mcp -H "Accept: application/json, text/event-stream" `
+       -H "Content-Type: application/json" -H "Authorization: Bearer <token>" `
+       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
+  ```
+  `421` is the host allowlist, `401` is the token, `200` with an SSE body is healthy.
 - **`Files` defines a method named `list`**, which shadows the builtin *inside
   the class body*. An eagerly evaluated `list[Path]` annotation there resolves
   to the method and raises `TypeError` at import. `from __future__ import
