@@ -3,6 +3,7 @@
 #
 
 import asyncio
+import os
 import struct
 import zlib
 from pathlib import Path
@@ -217,3 +218,80 @@ def test_host_ok_mirrors_the_sdk_matching_rule():
     assert not _host_ok("", allowed)
     # A peer's OWN name is never the Host header, so it must not match.
     assert not _host_ok("sisyphus:8791", allowed)
+
+
+# --- game logs -------------------------------------------------------------
+#
+# The staleness reporting is the point of this module: an absent or old
+# engine.log is what gets misread as "the subsystem never ran".
+
+from agent_bridge.logs import Logs
+
+
+def _build(tmp_path, with_log=True, log_older=False):
+    d = tmp_path / "platform" / "desktop" / "bin" / "Debug"
+    d.mkdir(parents=True)
+    (d / "RogueLite.exe").write_text("binary")
+    if with_log:
+        log = d / "engine.log"
+        log.write_text("[INFO] [LiveFeed] Connecting to ws://host/ws/game?u=someone\n"
+                       "[WARNING] [LiveFeed] Unable to connect\n"
+                       "[ERROR] boom\n")
+        if log_older:
+            os.utime(log, (1, 1))          # far older than the exe
+    return d
+
+
+def test_logs_are_found_inside_bin_which_bridge_read_refuses(tmp_path):
+    _build(tmp_path)
+    out = Logs({"proj": tmp_path}).list()
+    assert len(out["logs"]) == 1
+    assert out["logs"][0]["name"] == "engine.log"
+    assert out["logs"][0]["lines"] == 3
+
+
+def test_a_build_with_no_engine_log_is_reported_not_omitted(tmp_path):
+    _build(tmp_path, with_log=False)
+    out = Logs({"proj": tmp_path}).list()
+    assert out["logs"] == []
+    assert len(out["builds_without_engine_log"]) == 1
+    assert "OLD BINARY" in out["builds_without_engine_log"][0]["note"]
+
+
+def test_a_log_older_than_its_exe_says_so(tmp_path):
+    _build(tmp_path, log_older=True)
+    row = Logs({"proj": tmp_path}).list()["logs"][0]
+    assert "OLDER" in row["note"]
+
+
+def test_level_and_regex_filters(tmp_path):
+    _build(tmp_path)
+    lg = Logs({"proj": tmp_path})
+    assert lg.read(level="WARNING")["matched_lines"] == 1
+    assert lg.read(contains="u=([a-z.]+)")["matched_lines"] == 1
+    assert lg.read()["matched_lines"] == 3          # defaults to newest log
+
+
+def test_only_log_filenames_are_readable(tmp_path):
+    d = _build(tmp_path)
+    (d / "RogueLite.dll.config").write_text("secret")
+    with pytest.raises(ValueError, match="not a log"):
+        Logs({"proj": tmp_path})._resolve("proj:platform/desktop/bin/Debug/RogueLite.exe")
+
+
+def test_log_outside_every_root_is_refused(tmp_path):
+    _build(tmp_path)
+    outside = tmp_path.parent / "engine.log"
+    outside.write_text("x")
+    with pytest.raises(ValueError, match="outside every configured root"):
+        Logs({"proj": tmp_path})._resolve(str(outside))
+
+
+def test_a_folder_with_diag_but_no_engine_log_is_still_flagged(tmp_path):
+    # Regression: dist/live has a diag.log and no engine.log. Keying the
+    # missing-scan on "any log found here" hid exactly that build.
+    d = _build(tmp_path, with_log=False)
+    (d / "diag.log").write_text("=== session start ===\n")
+    out = Logs({"proj": tmp_path}).list()
+    assert any(r["name"] == "diag.log" for r in out["logs"])
+    assert len(out["builds_without_engine_log"]) == 1, out

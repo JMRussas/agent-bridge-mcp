@@ -37,6 +37,7 @@ from agent_bridge.avatar import Avatars
 from agent_bridge.config import Config
 from agent_bridge.execute import ExecDenied, Runner
 from agent_bridge.files import Files, PathDenied
+from agent_bridge.logs import Logs
 from agent_bridge.mailbox import Mailbox
 
 log = logging.getLogger("agent-bridge")
@@ -90,6 +91,7 @@ def build(cfg: Config):
     files = Files(cfg.roots, int(cfg.max_read_bytes))
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     avatars = Avatars(cfg.gifterboard, cfg.roots)
+    logs = Logs(cfg.roots)
 
     hosts = allowed_hosts(cfg)
     mcp = FastMCP(
@@ -213,6 +215,32 @@ def build(cfg: Config):
         try:
             return await runner.run(name, args, root)
         except ExecDenied as e:
+            return {"error": str(e)}
+
+    # --- game logs ----------------------------------------------------------
+
+    @mcp.tool()
+    def logs_list() -> dict:
+        """Every engine.log / diag.log on this machine, newest first.
+
+        Also lists builds that have NO engine.log, because that absence is the
+        trap: a binary published before Log.Path was set never writes one, so
+        "no log" means old binary, not "the subsystem never ran".
+        """
+        return logs.list()
+
+    @mcp.tool()
+    def logs_read(target: str = "", lines: int = 200, contains: str = "",
+                  level: str = "") -> dict:
+        """Read a game log, newest lines last. Defaults to the most recent one.
+
+        `contains` is a regex filter, `level` keeps one of INFO/WARNING/ERROR.
+        Every result carries the log's age and how it compares to the executable
+        beside it, so a stale file cannot be read as current.
+        """
+        try:
+            return logs.read(target, lines, contains, level)
+        except ValueError as e:
             return {"error": str(e)}
 
     # --- avatar / decode probes --------------------------------------------
