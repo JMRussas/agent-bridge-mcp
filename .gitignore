@@ -4,3 +4,6 @@ __pycache__/
 config.json
 *.rgba
 *.png
+server.log
+server.err
+server.pid
