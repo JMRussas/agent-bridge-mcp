@@ -388,3 +388,20 @@ def test_wait_times_out_cleanly_with_no_mail():
         # Unsubscribing must not leave the queue registered.
         assert q not in box._subs.get("fenrir", [])
     asyncio.run(go())
+
+
+def test_ws_backlog_marked_read_is_not_replayed_after_restart(tmp_path):
+    # Regression: the /notify backlog peeked without consuming, so a listener
+    # that reads its mail from the socket never marked anything read and every
+    # reconnect replayed the same messages.
+    store = tmp_path / "mailbox.json"
+    box = Mailbox(store=store)
+    box.post("sisyphus", "fenrir", "delivered over the socket")
+
+    backlog = box.inbox("fenrir", peek=True)
+    assert len(backlog) == 1
+    for m in backlog:          # what notify() does once the frame is sent
+        m.read = True
+    box.flush()
+
+    assert Mailbox(store=store).inbox("fenrir", peek=True) == []

@@ -479,10 +479,19 @@ def build(cfg: Config):
 
         # Anything already waiting is replayed first, so connecting late does not
         # mean missing the message that prompted someone to connect.
+        #
+        # Peeked, then marked read only AFTER the frame is actually on the wire.
+        # Leaving it unread meant a listener that reads its mail from this socket
+        # never consumed anything, so every reconnect replayed the same backlog -
+        # and this server reconnects often. Marking read before sending would be
+        # the opposite bug: a send that fails would drop the message silently.
         backlog = box.inbox(agent, limit=20, peek=True)
         try:
             for m in backlog:
                 await ws.send_text(_frame(m, pending=True))
+                m.read = True
+            if backlog:
+                box.flush()
             # No application-level keepalive on purpose. Every text frame this
             # socket sends becomes a notification in the listening agent's
             # session, so a heartbeat would interrupt it on a timer for no

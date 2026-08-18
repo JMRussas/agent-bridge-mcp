@@ -167,6 +167,11 @@ class Mailbox:
         self._subs.setdefault(agent, []).append(q)
         return q
 
+    # Persist read-state changes made directly on Message objects, e.g. by the
+    # WebSocket marking a backlog entry read once its frame is actually sent.
+    def flush(self) -> None:
+        self._persist()
+
     def unsubscribe(self, agent: str, q: asyncio.Queue) -> None:
         agent = (agent or "*").strip().lower()
         lst = self._subs.get(agent, [])
