@@ -168,6 +168,41 @@ def build(cfg: Config):
                 "messages": [m.as_dict() for m in msgs]}
 
     @mcp.tool()
+    async def bridge_wait(agent: str, timeout: float = 25.0, peek: bool = False) -> dict:
+        """Block until a message arrives for `agent`, or until timeout.
+
+        Use this instead of polling bridge_inbox on a timer. It returns the
+        instant a message lands, so a reply costs a round trip rather than half
+        a poll interval. Returns immediately if mail is already waiting. On
+        timeout it returns an empty list, which is not an error - just call it
+        again. This is the WebSocket's latency without the WebSocket, for a
+        client that cannot open one.
+        """
+        waited = max(1.0, min(float(timeout), 120.0))
+
+        # Anything already unread short-circuits: a caller must never block
+        # while a question sits in its own inbox.
+        existing = box.inbox(agent, limit=20, peek=peek)
+        if existing:
+            return {"agent": agent, "count": len(existing), "timed_out": False,
+                    "messages": [m.as_dict() for m in existing]}
+
+        q = box.subscribe(agent)
+        try:
+            await asyncio.wait_for(q.get(), timeout=waited)
+        except asyncio.TimeoutError:
+            return {"agent": agent, "count": 0, "timed_out": True,
+                    "waited_s": waited, "messages": []}
+        finally:
+            box.unsubscribe(agent, q)
+
+        # Re-read through the mailbox rather than returning the queued object, so
+        # read state is recorded exactly as bridge_inbox would record it.
+        msgs = box.inbox(agent, limit=20, peek=peek)
+        return {"agent": agent, "count": len(msgs), "timed_out": False,
+                "messages": [m.as_dict() for m in msgs]}
+
+    @mcp.tool()
     def bridge_history(agent: str = "", limit: int = 50, thread: str = "") -> dict:
         """Recent traffic, read or not, for context on an ongoing thread."""
         return {"messages": [m.as_dict() for m in box.history(agent, limit, thread)]}
@@ -218,6 +253,7 @@ def build(cfg: Config):
                         "application keepalive by design - every text frame is a "
                         "real message.",
                 "in_claude_code": "Monitor(ws={url: '...'}, persistent: true)",
+                "IF THAT IS BLOCKED": "Claude Code's Monitor refuses WebSockets to private-range addresses, which makes /notify unusable across a LAN. Use bridge_wait() instead - it blocks until a message arrives and returns the same latency without a socket.",
             },
             "rest": {
                 "GET  /api/health": "unauthenticated; reports host_seen, host_allowed, "
@@ -226,6 +262,7 @@ def build(cfg: Config):
                 "GET  /api/inbox?agent=&limit=&peek=": "same mailbox",
                 "POST /api/send": '{"sender","to","text","thread"}',
                 "GET  /api/peers": "who has used this bridge",
+                "GET  /api/wait?agent=&timeout=": "long-poll; returns the instant mail arrives, or empty on timeout. The curl twin of bridge_wait.",
                 "why": "An agent already mid-session cannot gain a new MCP server "
                        "without restarting, but it can always shell out to curl.",
             },
@@ -406,6 +443,32 @@ def build(cfg: Config):
     async def api_peers(request: Request):
         return JSONResponse({"peers": box.peers()})
 
+    # The curl-shaped twin of bridge_wait, for a peer whose WebSocket client is
+    # restricted (Claude Code's Monitor refuses private-range addresses, which
+    # makes /notify unusable across a LAN even though the endpoint is fine).
+    async def api_wait(request: Request):
+        q_params = request.query_params
+        agent = q_params.get("agent", cfg.self_name)
+        waited = max(1.0, min(float(q_params.get("timeout", 25)), 120.0))
+        peek = q_params.get("peek", "0") not in ("0", "", "false")
+
+        existing = box.inbox(agent, limit=20, peek=peek)
+        if existing:
+            return JSONResponse({"count": len(existing), "timed_out": False,
+                                 "messages": [m.as_dict() for m in existing]})
+
+        q = box.subscribe(agent)
+        try:
+            await asyncio.wait_for(q.get(), timeout=waited)
+        except asyncio.TimeoutError:
+            return JSONResponse({"count": 0, "timed_out": True, "messages": []})
+        finally:
+            box.unsubscribe(agent, q)
+
+        msgs = box.inbox(agent, limit=20, peek=peek)
+        return JSONResponse({"count": len(msgs), "timed_out": False,
+                             "messages": [m.as_dict() for m in msgs]})
+
     async def notify(ws: WebSocket):
         if not authorised(ws):
             await ws.close(code=4401)
@@ -438,6 +501,7 @@ def build(cfg: Config):
     app.routes.append(Route("/api/send", api_send, methods=["POST"]))
     app.routes.append(Route("/api/inbox", api_inbox, methods=["GET"]))
     app.routes.append(Route("/api/peers", api_peers, methods=["GET"]))
+    app.routes.append(Route("/api/wait", api_wait, methods=["GET"]))
     app.add_middleware(Auth)
     return app
 

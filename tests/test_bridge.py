@@ -342,3 +342,49 @@ def test_memory_only_is_still_supported(tmp_path):
     box = Mailbox(store=None)
     box.post("x", "y", "z")
     assert len(box.inbox("y", peek=True)) == 1
+
+
+# --- long-poll -------------------------------------------------------------
+#
+# Exists because a peer's Monitor tool refuses WebSockets to private-range
+# addresses, making /notify unusable across a LAN. bridge_wait gives the same
+# latency over an ordinary request.
+
+def test_wait_returns_immediately_when_mail_is_already_waiting():
+    async def go():
+        box = Mailbox()
+        box.post("a", "fenrir", "already here")
+        q = box.subscribe("fenrir")
+        try:
+            # The short-circuit path: unread mail must not block.
+            existing = box.inbox("fenrir", peek=True)
+            assert len(existing) == 1
+        finally:
+            box.unsubscribe("fenrir", q)
+    asyncio.run(go())
+
+
+def test_wait_wakes_on_a_message_rather_than_timing_out():
+    async def go():
+        box = Mailbox()
+        q = box.subscribe("fenrir")
+        async def send_soon():
+            await asyncio.sleep(0.05)
+            box.post("sisyphus", "fenrir", "arrived while waiting")
+        asyncio.get_running_loop().create_task(send_soon())
+        msg = await asyncio.wait_for(q.get(), timeout=2.0)
+        assert msg.text == "arrived while waiting"
+        box.unsubscribe("fenrir", q)
+    asyncio.run(go())
+
+
+def test_wait_times_out_cleanly_with_no_mail():
+    async def go():
+        box = Mailbox()
+        q = box.subscribe("fenrir")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(q.get(), timeout=0.1)
+        box.unsubscribe("fenrir", q)
+        # Unsubscribing must not leave the queue registered.
+        assert q not in box._subs.get("fenrir", [])
+    asyncio.run(go())
