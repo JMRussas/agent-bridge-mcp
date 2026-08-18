@@ -167,6 +167,14 @@ editing that file and re-running `claude mcp add` on every peer.
        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
   ```
   `421` is the host allowlist, `401` is the token, `200` with an SSE body is healthy.
+
+  **A peer does not go in this list.** `allowed_hosts` is matched against the
+  `Host` header, which is the address the caller *dialled* — this machine —
+  not the caller's own name. SISYPHUS asking for `http://192.168.1.174:8791`
+  sends `Host: 192.168.1.174:8791`; the name "sisyphus" never appears. What
+  authorises a peer is the bearer token. `/api/health` reports `host_seen`,
+  `host_allowed` and `your_address` so a peer can settle this from its own
+  side in one unauthenticated request.
 - **`Files` defines a method named `list`**, which shadows the builtin *inside
   the class body*. An eagerly evaluated `list[Path]` annotation there resolves
   to the method and raises `TypeError` at import. `from __future__ import

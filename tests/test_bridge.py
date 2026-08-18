@@ -205,3 +205,15 @@ def test_derived_allowlist_covers_localhost_and_this_machine():
 def test_configured_allowlist_wins():
     hosts = allowed_hosts(Config({"allowed_hosts": ["example.internal:*"]}))
     assert hosts == ["example.internal:*"]
+
+
+def test_host_ok_mirrors_the_sdk_matching_rule():
+    from agent_bridge.server import _host_ok
+    allowed = ["192.168.1.174:*", "localhost:*", "exact.host"]
+    assert _host_ok("192.168.1.174:8791", allowed)
+    assert _host_ok("192.168.1.174:9999", allowed)      # any port
+    assert _host_ok("exact.host", allowed)
+    assert not _host_ok("evil.example.com", allowed)
+    assert not _host_ok("", allowed)
+    # A peer's OWN name is never the Host header, so it must not match.
+    assert not _host_ok("sisyphus:8791", allowed)

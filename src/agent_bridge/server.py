@@ -75,6 +75,16 @@ def allowed_hosts(cfg: Config) -> list[str]:
     return sorted(f"{n}:*" for n in names if n)
 
 
+# Mirrors the SDK's matching rule (exact, or a "host:*" any-port pattern) so
+# /api/health can tell a caller whether ITS request would clear /mcp.
+def _host_ok(host: str, allowed: list[str]) -> bool:
+    if not host:
+        return False
+    if host in allowed:
+        return True
+    return any(host.startswith(a[:-1]) for a in allowed if a.endswith(":*"))
+
+
 def build(cfg: Config):
     box = Mailbox(capacity=int(cfg.inbox_max))
     files = Files(cfg.roots, int(cfg.max_read_bytes))
@@ -254,8 +264,20 @@ def build(cfg: Config):
             return JSONResponse({"error": "bad or missing token"}, status_code=401)
 
     async def health(request: Request):
-        return JSONResponse({"ok": True, "self": cfg.self_name,
-                             "peers": box.peers(), "roots": sorted(cfg.roots)})
+        # host_seen and allowed_hosts are here so a peer that cannot reach /mcp
+        # can diagnose it from ITS OWN side in one request. The Host header is
+        # the address the caller dialled - this machine - never the caller's own
+        # name, which is the thing that makes the allowlist confusing.
+        return JSONResponse({
+            "ok": True,
+            "self": cfg.self_name,
+            "peers": box.peers(),
+            "roots": sorted(cfg.roots),
+            "host_seen": request.headers.get("host", ""),
+            "allowed_hosts": hosts,
+            "host_allowed": _host_ok(request.headers.get("host", ""), hosts),
+            "your_address": request.client.host if request.client else "",
+        })
 
     async def api_send(request: Request):
         body = await request.json()
