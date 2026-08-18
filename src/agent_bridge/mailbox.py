@@ -13,8 +13,11 @@
 # system of record.
 
 import asyncio
+import json
+import os
 import time
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 
 
 @dataclass
@@ -35,13 +38,52 @@ class Message:
 
 
 class Mailbox:
-    def __init__(self, capacity: int = 200):
+    # Persisted to disk, because "durable" has to mean durable against the
+    # process ending, not merely against a recipient being busy. Holding the
+    # queue in memory alone was wrong in the most ordinary way possible: this
+    # server is restarted every time a tool is added to it, and each restart
+    # silently discarded an unread question and every answer nobody had polled
+    # for yet. A mailbox that loses mail when its process exits is a buffer.
+    def __init__(self, capacity: int = 200, store: str | Path | None = None):
         self._capacity = capacity
         self._messages: list[Message] = []
         self._next_id = 1
         self._seen: dict[str, float] = {}
         # agent name -> queues. One agent may have several sessions listening.
         self._subs: dict[str, list[asyncio.Queue]] = {}
+        self._store = Path(store) if store else None
+        self._load()
+
+    # --- persistence --------------------------------------------------------
+
+    def _load(self) -> None:
+        if not self._store or not self._store.exists():
+            return
+        try:
+            data = json.loads(self._store.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return                                  # a corrupt store is not fatal
+        for row in data.get("messages", []):
+            row.pop("age_s", None)
+            try:
+                self._messages.append(Message(**row))
+            except TypeError:
+                continue
+        self._seen = data.get("seen", {})
+        self._next_id = max((m.id for m in self._messages), default=0) + 1
+
+    def _persist(self) -> None:
+        if not self._store:
+            return
+        payload = {"messages": [asdict(m) for m in self._messages], "seen": self._seen}
+        tmp = self._store.with_suffix(self._store.suffix + ".tmp")
+        try:
+            # Write-then-replace: a crash mid-write must not leave a truncated
+            # store that _load then silently discards.
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, self._store)
+        except OSError:
+            pass
 
     # --- writing ---
 
@@ -67,6 +109,7 @@ class Mailbox:
                 victim = self._messages[0]
             self._messages.remove(victim)
 
+        self._persist()
         self._fanout(msg)
         return msg
 
@@ -90,6 +133,9 @@ class Mailbox:
         if not peek:
             for m in out:
                 m.read = True
+            # Read state has to survive too, or a restart re-delivers everything
+            # the peer already answered.
+            self._persist()
         return out
 
     def history(self, agent: str = "", limit: int = 50, thread: str = "") -> list[Message]:

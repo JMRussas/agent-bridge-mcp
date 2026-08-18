@@ -19,6 +19,7 @@ DEFAULTS = {
     "allowed_hosts": [],
     "max_read_bytes": 256 * 1024,
     "inbox_max": 200,
+    "mailbox_store": "mailbox.json",
     "exec": {"enabled": False, "timeout": 300, "commands": {}},
     "gifterboard": {"url": "", "creator": "", "token": "", "avatar_size": 64},
 }

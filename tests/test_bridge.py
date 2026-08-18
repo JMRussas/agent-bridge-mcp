@@ -295,3 +295,50 @@ def test_a_folder_with_diag_but_no_engine_log_is_still_flagged(tmp_path):
     out = Logs({"proj": tmp_path}).list()
     assert any(r["name"] == "diag.log" for r in out["logs"])
     assert len(out["builds_without_engine_log"]) == 1, out
+
+
+# --- mailbox persistence ---------------------------------------------------
+#
+# Regression: the mailbox was memory-only, so restarting the server to add a
+# tool silently destroyed an unread question and every unpolled answer.
+
+def test_messages_survive_a_restart(tmp_path):
+    store = tmp_path / "mailbox.json"
+    a = Mailbox(store=store)
+    a.post("sisyphus", "fenrir", "the question nobody has read yet")
+
+    b = Mailbox(store=store)                      # simulates a process restart
+    kept = b.inbox("fenrir", peek=True)
+    assert len(kept) == 1
+    assert kept[0].text == "the question nobody has read yet"
+
+
+def test_read_state_survives_a_restart(tmp_path):
+    store = tmp_path / "mailbox.json"
+    a = Mailbox(store=store)
+    a.post("sisyphus", "fenrir", "already answered")
+    assert len(a.inbox("fenrir")) == 1             # marks it read
+
+    b = Mailbox(store=store)
+    assert b.inbox("fenrir") == []                 # must not be re-delivered
+
+
+def test_ids_do_not_restart_at_one(tmp_path):
+    store = tmp_path / "mailbox.json"
+    a = Mailbox(store=store)
+    first = a.post("x", "y", "one").id
+    b = Mailbox(store=store)
+    assert b.post("x", "y", "two").id > first
+
+
+def test_a_corrupt_store_does_not_take_the_server_down(tmp_path):
+    store = tmp_path / "mailbox.json"
+    store.write_text("{not json at all")
+    box = Mailbox(store=store)                     # must not raise
+    assert box.post("x", "y", "still works").id == 1
+
+
+def test_memory_only_is_still_supported(tmp_path):
+    box = Mailbox(store=None)
+    box.post("x", "y", "z")
+    assert len(box.inbox("y", peek=True)) == 1

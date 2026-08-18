@@ -23,6 +23,7 @@ import asyncio
 import hmac
 import logging
 import socket
+from pathlib import Path
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
@@ -87,7 +88,12 @@ def _host_ok(host: str, allowed: list[str]) -> bool:
 
 
 def build(cfg: Config):
-    box = Mailbox(capacity=int(cfg.inbox_max))
+    # A relative store sits beside config.json, not beside whatever directory the
+    # service happened to be started from.
+    store = cfg.mailbox_store
+    if store and not Path(store).is_absolute():
+        store = Path(__file__).resolve().parents[2] / store
+    box = Mailbox(capacity=int(cfg.inbox_max), store=store or None)
     files = Files(cfg.roots, int(cfg.max_read_bytes))
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     avatars = Avatars(cfg.gifterboard, cfg.roots)
