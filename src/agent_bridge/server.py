@@ -47,6 +47,14 @@ log = logging.getLogger("agent-bridge")
 OPEN_PATHS = ("/api/health",)
 
 
+def UNAUTHORISED() -> JSONResponse:
+    return JSONResponse({
+        "error": "bad or missing token",
+        "hint": "send it as 'Authorization: Bearer <token>'. The ?token= query "
+                "form is accepted on the /notify WebSocket only.",
+    }, status_code=401)
+
+
 # The MCP transport carries its own DNS-rebinding protection, which validates the
 # Host header against an allowlist that is EMPTY by default. That default rejects
 # every request that did not arrive as "localhost" with 421 Misdirected Request,
@@ -259,6 +267,8 @@ def build(cfg: Config):
                 "IF THAT IS BLOCKED": "Claude Code's Monitor refuses WebSockets to private-range addresses, which makes /notify unusable across a LAN. Use bridge_wait() instead - it blocks until a message arrives and returns the same latency without a socket.",
             },
             "rest": {
+                "auth": "Authorization: Bearer <token> header on every route except "
+                        "/api/health. The ?token= form works on /notify only.",
                 "GET  /api/health": "unauthenticated; reports host_seen, host_allowed, "
                                     "your_address - use it to tell a firewall problem "
                                     "from a token problem from a Host-allowlist 421",
@@ -426,7 +436,7 @@ def build(cfg: Config):
         async def dispatch(self, request: Request, call_next):
             if request.url.path in OPEN_PATHS or authorised(request):
                 return await call_next(request)
-            return JSONResponse({"error": "bad or missing token"}, status_code=401)
+            return UNAUTHORISED()
 
     async def health(request: Request):
         # host_seen and allowed_hosts are here so a peer that cannot reach /mcp
@@ -491,7 +501,10 @@ def build(cfg: Config):
 
     async def notify(ws: WebSocket):
         if not authorised(ws, allow_query=True):
-            await ws.close(code=4401)
+            # A close before accept is rewritten by uvicorn into a bare 403
+            # handshake rejection, which a client cannot tell from a proxy
+            # refusing it. Deny the handshake with the same 401 body HTTP gets.
+            await ws.send_denial_response(UNAUTHORISED())
             return
         agent = (ws.query_params.get("agent") or cfg.self_name).lower()
         await ws.accept()

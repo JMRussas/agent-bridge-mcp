@@ -8,8 +8,7 @@
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
+from starlette.testclient import TestClient, WebSocketDenialResponse
 
 from agent_bridge.config import Config
 from agent_bridge.server import build
@@ -74,8 +73,17 @@ def test_websocket_still_accepts_the_header(client):
         assert "ping" in ws.receive_text()
 
 
-def test_websocket_refuses_a_bad_token(client):
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/notify?agent=x&token=wrong") as ws:
-            ws.receive_text()
-    assert exc.value.code == 4401
+def test_websocket_refuses_a_bad_token_with_a_401_handshake(client):
+    # A pre-accept close becomes an anonymous 403 by the time uvicorn is done
+    # with it; denying the handshake is what a real client actually sees.
+    with pytest.raises(WebSocketDenialResponse) as exc:
+        with client.websocket_connect("/notify?agent=x&token=wrong"):
+            pass
+    assert exc.value.status_code == 401
+    assert "Bearer" in exc.value.json()["hint"]
+
+
+def test_401_body_says_where_the_token_goes(client):
+    r = client.get(f"/api/inbox?agent=x&token={TOKEN}")
+    assert r.status_code == 401
+    assert "/notify" in r.json()["hint"]
