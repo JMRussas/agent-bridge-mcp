@@ -37,9 +37,12 @@ class Config:
         merged = {**DEFAULTS, **data}
         merged["exec"] = {**DEFAULTS["exec"], **data.get("exec", {})}
         merged["gifterboard"] = {**DEFAULTS["gifterboard"], **data.get("gifterboard", {})}
+        # A null token is no token. Left as None it would slip past every
+        # "is this a placeholder" check while authorised() treated it as open.
+        merged["token"] = merged.get("token") or ""
         self._d = merged
 
-        if not TOKEN_CHARS.match(merged["token"] or ""):
+        if not TOKEN_CHARS.match(merged["token"]):
             raise SystemExit(
                 "token contains characters the WebSocket subprotocol grammar cannot "
                 "carry. Use A-Z a-z 0-9 and any of - . _ ~ (a hex or base64url "

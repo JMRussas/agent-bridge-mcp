@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent_bridge.cli import main
+from agent_bridge.config import Config
 from agent_bridge.server import refuse_open_bind
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -34,6 +35,33 @@ def test_loopback_without_a_token_is_allowed(host):
 
 def test_a_real_token_binds_anywhere():
     refuse_open_bind("0.0.0.0", "0123456789abcdef")
+
+
+def test_a_null_token_is_no_token(tmp_path: Path):
+    # Regression: "token": null slipped past the placeholder check as None and
+    # then authorised() treated it as "no token configured" - an open bind.
+    assert Config({"token": None}).token == ""
+    with pytest.raises(SystemExit, match="refusing to bind"):
+        refuse_open_bind("0.0.0.0", Config({"token": None}).token)
+
+
+@pytest.mark.parametrize("host", ["::1234", "localhost.lan", "127.0.0.1.evil", "0.0.0.0", "::"])
+def test_lookalike_hosts_are_not_loopback(host):
+    # Regression: a string-prefix test let "::1234" and "localhost.lan" through.
+    with pytest.raises(SystemExit, match="refusing to bind"):
+        refuse_open_bind(host, "")
+
+
+def test_localhost_is_case_insensitive():
+    refuse_open_bind("LOCALHOST", "")
+
+
+def test_peer_instructions_drop_link_local_and_lead_with_the_route_address(monkeypatch):
+    from agent_bridge import cli
+    monkeypatch.setattr(cli, "lan_addresses", lambda: ["192.168.1.10", "172.28.0.1"])
+    text = cli.peer_instructions(Config({"token": "abc", "self_name": "x"}))
+    assert "http://192.168.1.10:8791/mcp" in text
+    assert "also has 172.28.0.1" in text
 
 
 # --- init / token ----------------------------------------------------------------

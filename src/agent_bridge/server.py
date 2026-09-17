@@ -21,6 +21,7 @@
 
 import asyncio
 import hmac
+import ipaddress
 import logging
 import socket
 from pathlib import Path
@@ -582,8 +583,16 @@ def _frame(msg, pending: bool = False) -> str:
     return f"{head}: {msg.text}"
 
 
-LOOPBACK = ("127.", "::1", "localhost")
 PLACEHOLDER_TOKENS = {"", "CHANGE_ME", "changeme", "change-me"}
+
+
+def is_loopback(host: str) -> bool:
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip()).is_loopback
+    except ValueError:
+        return False
 
 
 # A copied example config has "CHANGE_ME" in it, and the old behaviour was to
@@ -591,7 +600,7 @@ PLACEHOLDER_TOKENS = {"", "CHANGE_ME", "changeme", "change-me"}
 # runs commands; an open bind is refused, not logged. Loopback with no token is
 # still allowed, because that is how a single-machine setup works.
 def refuse_open_bind(host: str, token: str) -> None:
-    if token in PLACEHOLDER_TOKENS and not host.startswith(LOOPBACK):
+    if (not token or token in PLACEHOLDER_TOKENS) and not is_loopback(host):
         what = "no token" if not token else "the placeholder token"
         raise SystemExit(
             f"refusing to bind {host} with {what}: every machine that can reach "

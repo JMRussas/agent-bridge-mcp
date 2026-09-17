@@ -26,19 +26,44 @@ def new_token() -> str:
 
 
 def lan_addresses() -> list[str]:
+    """This machine's candidate addresses, the one a peer most likely needs first.
+
+    A box with WSL2, Hyper-V or a VPN has several non-loopback addresses and
+    the first one gethostbyname_ex returns is often the virtual adapter. The
+    address the default route leaves by is the one a LAN peer can reach, so it
+    goes first; link-local (169.254.x) is never reachable from anywhere and is
+    dropped.
+    """
+    addrs: list[str] = []
     try:
-        _, _, addrs = socket.gethostbyname_ex(socket.gethostname())
+        # connect() on a UDP socket sends nothing; it only picks the source
+        # address the OS would route from.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))              # TEST-NET-1: never answers
+            addrs.append(s.getsockname()[0])
     except OSError:
-        return []
-    return [a for a in addrs if not a.startswith("127.")]
+        pass
+    try:
+        _, _, more = socket.gethostbyname_ex(socket.gethostname())
+    except OSError:
+        more = []
+    for a in more:
+        if a not in addrs and not a.startswith(("127.", "169.254.")):
+            addrs.append(a)
+    return addrs
 
 
 def peer_instructions(cfg: Config, host: str | None = None) -> str:
-    addr = host or (lan_addresses() or ["<this-host>"])[0]
+    candidates = [host] if host else (lan_addresses() or ["<this-host>"])
+    addr = candidates[0]
     base = f"http://{addr}:{cfg.port}"
     t = cfg.token
+    others = ""
+    if len(candidates) > 1:
+        others = (f"\n  (this machine also has {', '.join(candidates[1:])}; "
+                  f"{addr} is the default-route address, which is usually the right one)")
     return "\n".join([
-        f"On a peer, register this bridge ('{cfg.self_name}') with Claude Code:",
+        f"On a peer, register this bridge ('{cfg.self_name}') with Claude Code:{others}",
         "",
         f"  claude mcp add --transport http {cfg.self_name} {base}/mcp \\",
         f"    --header \"Authorization: Bearer {t}\"",
