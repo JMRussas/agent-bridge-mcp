@@ -8,9 +8,18 @@
 # The polling half and the push half are NOT alternatives. An agent that is
 # mid-turn cannot service a socket, so every message is durably queued first and
 # only then offered to whatever happens to be listening. A subscriber that is
-# absent, slow or dead therefore loses nothing: it reads the same message out of
-# the inbox on its next turn. Push is an optimisation on latency, never the
-# system of record.
+# absent, slow or dead loses nothing: it reads the same message out of the inbox
+# on its next turn.
+#
+# One deliberate exception: a message actually written to a connected /notify
+# socket under the addressee's own name is consumed, exactly as bridge_inbox
+# would consume it. "Written" means the frame reached the kernel, not that the
+# listener processed it; a half-open connection (sleep, Wi-Fi drop) can lose
+# that one frame from the inbox, though bridge_history keeps it. The
+# alternative - never consuming on the socket - replayed every message on every
+# reconnect, forever, and this server reconnects often. Push is therefore the
+# system of record only for a listener that is connected; for everyone else it
+# is still just latency.
 
 import asyncio
 import json
@@ -158,6 +167,35 @@ class Mailbox:
              for n in names if n),
             key=lambda r: r["name"],
         )
+
+    # Block until mail arrives for `agent`, or `timeout` passes. Returns what
+    # bridge_inbox would have returned at that moment.
+    #
+    # The message that woke us is included even if a /notify socket for the
+    # same agent marked it read between the wake-up and the re-read - both
+    # subscribe to the same fan-out, and the socket's send can complete first.
+    # Without this the waiter reported "mail arrived" with an empty list.
+    async def wait(self, agent: str, timeout: float, limit: int = 20,
+                   peek: bool = False) -> tuple[list[Message], bool]:
+        agent = (agent or "").strip().lower()
+        existing = self.inbox(agent, limit=limit, peek=peek)
+        if existing:
+            return existing, False
+
+        q = self.subscribe(agent)
+        try:
+            woke = await asyncio.wait_for(q.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return [], True
+        finally:
+            self.unsubscribe(agent, q)
+
+        msgs = self.inbox(agent, limit=limit, peek=peek)
+        if woke.to == agent and woke not in msgs:
+            if not peek:
+                self.mark_read(woke)
+            msgs.insert(0, woke)
+        return msgs, False
 
     # --- live subscription ---
 

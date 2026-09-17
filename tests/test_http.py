@@ -86,6 +86,14 @@ def test_a_live_frame_is_consumed_and_not_replayed_on_reconnect(client):
         assert "second" in frame and "backlog" not in frame
 
 
+def test_agent_name_is_normalised_on_the_socket(client):
+    with client.websocket_connect("/notify?agent=X%20", headers=BEARER) as ws:
+        client.post("/api/send", json={"sender": "a", "to": "x", "text": "trim"},
+                    headers=BEARER)
+        assert "trim" in ws.receive_text()
+    assert client.get("/api/inbox?agent=x&peek=1", headers=BEARER).json()["count"] == 0
+
+
 def test_a_wildcard_listener_does_not_consume_another_agents_mail(client):
     with client.websocket_connect("/notify?agent=*", headers=BEARER) as ws:
         client.post("/api/send", json={"sender": "a", "to": "y", "text": "for y"},

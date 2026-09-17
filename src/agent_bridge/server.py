@@ -201,28 +201,12 @@ def build(cfg: Config):
         client that cannot open one.
         """
         waited = max(1.0, min(float(timeout), 120.0))
-
-        # Anything already unread short-circuits: a caller must never block
-        # while a question sits in its own inbox.
-        existing = box.inbox(agent, limit=20, peek=peek)
-        if existing:
-            return {"agent": agent, "count": len(existing), "timed_out": False,
-                    "messages": [m.as_dict() for m in existing]}
-
-        q = box.subscribe(agent)
-        try:
-            await asyncio.wait_for(q.get(), timeout=waited)
-        except asyncio.TimeoutError:
-            return {"agent": agent, "count": 0, "timed_out": True,
-                    "waited_s": waited, "messages": []}
-        finally:
-            box.unsubscribe(agent, q)
-
-        # Re-read through the mailbox rather than returning the queued object, so
-        # read state is recorded exactly as bridge_inbox would record it.
-        msgs = box.inbox(agent, limit=20, peek=peek)
-        return {"agent": agent, "count": len(msgs), "timed_out": False,
-                "messages": [m.as_dict() for m in msgs]}
+        msgs, timed_out = await box.wait(agent, waited, peek=peek)
+        out = {"agent": agent, "count": len(msgs), "timed_out": timed_out,
+               "messages": [m.as_dict() for m in msgs]}
+        if timed_out:
+            out["waited_s"] = waited
+        return out
 
     @mcp.tool()
     def bridge_history(agent: str = "", limit: int = 50, thread: str = "") -> dict:
@@ -272,9 +256,12 @@ def build(cfg: Config):
                         "Sec-WebSocket-Protocol header), or send Authorization: "
                         "Bearer if your client can. The token is never in the URL.",
                 "note": "Unread messages are replayed on connect, so subscribing "
-                        "late does not miss what prompted you to connect. There is "
-                        "no application keepalive by design - every text frame is "
-                        "a real message.",
+                        "late does not miss what prompted you to connect. A frame "
+                        "written to this socket under your own name is CONSUMED, "
+                        "the same as reading it with bridge_inbox - so do not run "
+                        "a listener and expect bridge_inbox to show the same mail. "
+                        "bridge_history keeps everything. There is no application "
+                        "keepalive by design - every text frame is a real message.",
                 "in_claude_code": "Monitor(ws={url: '...', protocols: ['bridge', "
                                   "'bearer.<token>']}, ...)",
                 "IF THAT IS BLOCKED": "Claude Code's Monitor refuses WebSockets to private-range addresses, which makes /notify unusable across a LAN. Use bridge_wait() instead - it blocks until a message arrives and returns the same latency without a socket.",
@@ -490,21 +477,8 @@ def build(cfg: Config):
         waited = max(1.0, min(float(q_params.get("timeout", 25)), 120.0))
         peek = q_params.get("peek", "0") not in ("0", "", "false")
 
-        existing = box.inbox(agent, limit=20, peek=peek)
-        if existing:
-            return JSONResponse({"count": len(existing), "timed_out": False,
-                                 "messages": [m.as_dict() for m in existing]})
-
-        q = box.subscribe(agent)
-        try:
-            await asyncio.wait_for(q.get(), timeout=waited)
-        except asyncio.TimeoutError:
-            return JSONResponse({"count": 0, "timed_out": True, "messages": []})
-        finally:
-            box.unsubscribe(agent, q)
-
-        msgs = box.inbox(agent, limit=20, peek=peek)
-        return JSONResponse({"count": len(msgs), "timed_out": False,
+        msgs, timed_out = await box.wait(agent, waited, peek=peek)
+        return JSONResponse({"count": len(msgs), "timed_out": timed_out,
                              "messages": [m.as_dict() for m in msgs]})
 
     async def notify(ws: WebSocket):
@@ -514,7 +488,9 @@ def build(cfg: Config):
             # refusing it. Deny the handshake with the same 401 body HTTP gets.
             await ws.send_denial_response(UNAUTHORISED())
             return
-        agent = (ws.query_params.get("agent") or cfg.self_name).lower()
+        # Normalised the same way the mailbox does, or "x " subscribes as "x"
+        # and then never matches m.to when deciding what to consume.
+        agent = (ws.query_params.get("agent") or cfg.self_name).strip().lower()
         # Select "bridge" if it was offered. A client that offered only the
         # bearer entry gets no protocol echoed back, which some clients treat
         # as a failed handshake - hence the docs say to offer both.
