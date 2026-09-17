@@ -25,6 +25,7 @@ import logging
 import socket
 from pathlib import Path
 
+import anyio
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -295,27 +296,32 @@ def build(cfg: Config):
                 "usage": "Address files as 'root:relative/path', e.g. "
                          "'rogue-lite:game/live/ViewerRegistry.cs'."}
 
-    @mcp.tool()
-    def bridge_list(root: str = "", glob: str = "**/*", limit: int = 200) -> dict:
-        """List files in a configured root, filtered by glob."""
-        return files.list(root, glob, limit)
+    # The SDK calls a plain-function tool inline on the event loop, so every
+    # tool below that touches the disk runs its body in a worker thread. Left
+    # synchronous, one slow directory walk stalls the WebSocket, the long-poll
+    # and every other session until it finishes.
 
     @mcp.tool()
-    def bridge_read(path: str, start: int = 1, count: int = 0) -> dict:
+    async def bridge_list(root: str = "", glob: str = "**/*", limit: int = 200) -> dict:
+        """List files in a configured root, filtered by glob."""
+        return await anyio.to_thread.run_sync(files.list, root, glob, limit)
+
+    @mcp.tool()
+    async def bridge_read(path: str, start: int = 1, count: int = 0) -> dict:
         """Read a file as numbered lines. Address it as 'root:relative/path'.
 
         `start`/`count` read a slice, which is required for large files.
         """
         try:
-            return files.read(path, start, count)
+            return await anyio.to_thread.run_sync(files.read, path, start, count)
         except (PathDenied, OSError) as e:
             return {"error": str(e)}
 
     @mcp.tool()
-    def bridge_grep(pattern: str, root: str = "", glob: str = "", limit: int = 100,
-                    context: int = 0, ignore_case: bool = False) -> dict:
+    async def bridge_grep(pattern: str, root: str = "", glob: str = "", limit: int = 100,
+                          context: int = 0, ignore_case: bool = False) -> dict:
         """Search the configured roots with a regular expression (ripgrep)."""
-        return files.grep(pattern, root, glob, limit, context, ignore_case)
+        return await files.grep(pattern, root, glob, limit, context, ignore_case)
 
     # --- allowlisted execution ---------------------------------------------
 
@@ -339,18 +345,18 @@ def build(cfg: Config):
     # --- game logs ----------------------------------------------------------
 
     @mcp.tool()
-    def logs_list() -> dict:
+    async def logs_list() -> dict:
         """Every engine.log / diag.log on this machine, newest first.
 
         Also lists builds that have NO engine.log, because that absence is the
         trap: a binary published before Log.Path was set never writes one, so
         "no log" means old binary, not "the subsystem never ran".
         """
-        return logs.list()
+        return await anyio.to_thread.run_sync(logs.list)
 
     @mcp.tool()
-    def logs_read(target: str = "", lines: int = 200, contains: str = "",
-                  level: str = "") -> dict:
+    async def logs_read(target: str = "", lines: int = 200, contains: str = "",
+                        level: str = "") -> dict:
         """Read a game log, newest lines last. Defaults to the most recent one.
 
         `contains` is a regex filter, `level` keeps one of INFO/WARNING/ERROR.
@@ -358,20 +364,20 @@ def build(cfg: Config):
         beside it, so a stale file cannot be read as current.
         """
         try:
-            return logs.read(target, lines, contains, level)
+            return await anyio.to_thread.run_sync(logs.read, target, lines, contains, level)
         except ValueError as e:
             return {"error": str(e)}
 
     # --- avatar / decode probes --------------------------------------------
 
     @mcp.tool()
-    def avatar_contract() -> dict:
+    async def avatar_contract() -> dict:
         """Compare the avatar byte contract as written on BOTH sides.
 
         Reads AvatarSize from ViewerRegistry.cs and AVATAR_SIZE from game-feed.js
         and reports whether they still agree. A disagreement is silent at runtime.
         """
-        return avatars.expectations()
+        return await anyio.to_thread.run_sync(avatars.expectations)
 
     @mcp.tool()
     async def avatar_probe(uid: str, size: int = 0, creator: str = "") -> dict:

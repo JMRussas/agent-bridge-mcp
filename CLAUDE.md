@@ -179,6 +179,13 @@ editing that file and re-running `claude mcp add` on every peer.
   authorises a peer is the bearer token. `/api/health` reports `host_seen`,
   `host_allowed` and `your_address` so a peer can settle this from its own
   side in one unauthenticated request.
+- **The MCP SDK calls a plain-function tool inline on the event loop.** A
+  sync tool that walks a directory or waits on a subprocess stalls `/notify`,
+  `/api/wait` and every other session until it returns. Every tool that touches
+  the disk is therefore `async` and runs its body under
+  `anyio.to_thread.run_sync`; ripgrep is an awaited subprocess. Keep it that
+  way when adding a tool - the mailbox tools are the only ones cheap enough to
+  stay sync.
 - **`Files` defines a method named `list`**, which shadows the builtin *inside
   the class body*. An eagerly evaluated `list[Path]` annotation there resolves
   to the method and raises `TypeError` at import. `from __future__ import
