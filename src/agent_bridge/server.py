@@ -408,12 +408,18 @@ def build(cfg: Config):
 
     # --- HTTP app ----------------------------------------------------------
 
-    def authorised(request_or_ws) -> bool:
+    # The query-string form exists for ONE client: the WebSocket consumer, whose
+    # config is a URL with nowhere to put a header. It used to be accepted on
+    # every route, which meant `curl "/api/inbox?token=..."` worked and the
+    # token landed in any access log between the peer and this box. HTTP
+    # routes take the header only.
+    def authorised(request_or_ws, allow_query: bool = False) -> bool:
         if not cfg.token:
             return True
         header = request_or_ws.headers.get("authorization", "")
         supplied = header[7:] if header.lower().startswith("bearer ") else ""
-        supplied = supplied or request_or_ws.query_params.get("token", "")
+        if not supplied and allow_query:
+            supplied = request_or_ws.query_params.get("token", "")
         return hmac.compare_digest(supplied, cfg.token)
 
     class Auth(BaseHTTPMiddleware):
@@ -484,7 +490,7 @@ def build(cfg: Config):
                              "messages": [m.as_dict() for m in msgs]})
 
     async def notify(ws: WebSocket):
-        if not authorised(ws):
+        if not authorised(ws, allow_query=True):
             await ws.close(code=4401)
             return
         agent = (ws.query_params.get("agent") or cfg.self_name).lower()
