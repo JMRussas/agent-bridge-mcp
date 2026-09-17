@@ -77,8 +77,9 @@ The point of `/notify` is that a message *arrives* rather than being asked for.
 In Claude Code, the `Monitor` tool consumes it directly:
 
 ```
-Monitor(ws: {url: "ws://127.0.0.1:8791/notify?agent=fenrir&token=<token>"},
-        persistent: true)
+Monitor(ws: {url: "ws://127.0.0.1:8791/notify?agent=fenrir",
+             protocols: ["bridge", "bearer.<token>"]},
+        description: "bridge mail for fenrir", timeout_ms: 1800000)
 ```
 
 Each text frame becomes one notification in the session. Two consequences shaped
@@ -87,11 +88,15 @@ the implementation:
 - **No application-level keepalive.** A heartbeat text frame would interrupt the
   listening agent on a timer, forever, carrying no information. uvicorn's
   protocol-level pings keep the socket alive instead.
-- **The token goes in the query string**, because a `Monitor` ws config accepts
-  a URL and has nowhere to put a header. URLs land in logs, which is a real
-  weakening — and the reason this binds to the LAN and not the internet. The
-  query form is accepted on `/notify` **only**; every HTTP route takes the
-  `Authorization: Bearer` header and nothing else.
+- **The token rides in `Sec-WebSocket-Protocol`, not the URL.** A `Monitor` ws
+  config has no header field, but it has `protocols` — and that *is* a header.
+  The client offers `["bridge", "bearer.<token>"]`; the server verifies the
+  second and selects the first. Same trick Kubernetes uses for `kubectl exec`.
+  The older `?token=` form is gone: it put the secret in every access log
+  between the peer and this box. Every HTTP route takes `Authorization: Bearer`
+  and nothing else. Because of this, **the token must be made of subprotocol
+  characters** (`A-Z a-z 0-9 - . _ ~` and a few others); config loading refuses
+  one that is not. A 32-char hex or base64url token is fine.
 
 ## Tools
 

@@ -58,12 +58,21 @@ def test_rest_refuses_the_token_in_the_query_string(client):
                        json={"to": "x", "text": "hi"}).status_code == 401
 
 
-def test_websocket_accepts_the_token_in_the_query_string(client):
-    with client.websocket_connect(f"/notify?agent=x&token={TOKEN}") as ws:
+def test_websocket_accepts_the_token_as_a_subprotocol(client):
+    with client.websocket_connect("/notify?agent=x",
+                                  subprotocols=["bridge", f"bearer.{TOKEN}"]) as ws:
+        assert ws.accepted_subprotocol == "bridge"
         r = client.post("/api/send", json={"sender": "a", "to": "x", "text": "ping"},
                         headers=BEARER)
         assert r.status_code == 200
         assert ws.receive_text().endswith("a -> x: ping")
+
+
+def test_websocket_refuses_the_token_in_the_query_string(client):
+    with pytest.raises(WebSocketDenialResponse) as exc:
+        with client.websocket_connect(f"/notify?agent=x&token={TOKEN}"):
+            pass
+    assert exc.value.status_code == 401
 
 
 def test_websocket_still_accepts_the_header(client):
@@ -86,4 +95,12 @@ def test_websocket_refuses_a_bad_token_with_a_401_handshake(client):
 def test_401_body_says_where_the_token_goes(client):
     r = client.get(f"/api/inbox?agent=x&token={TOKEN}")
     assert r.status_code == 401
-    assert "/notify" in r.json()["hint"]
+    assert "bearer." in r.json()["hint"]
+
+
+def test_a_token_the_subprotocol_grammar_cannot_carry_is_refused_at_load():
+    with pytest.raises(SystemExit, match="subprotocol"):
+        Config({"token": "has a space"})
+    with pytest.raises(SystemExit, match="subprotocol"):
+        Config({"token": "has=equals"})
+    Config({"token": "0123abcd-._~"})          # hex, base64url and unreserved: fine

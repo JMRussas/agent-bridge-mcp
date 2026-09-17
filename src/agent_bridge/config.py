@@ -8,7 +8,13 @@
 
 import json
 import os
+import re
 from pathlib import Path
+
+# RFC 6455 subprotocol names are HTTP tokens. The WebSocket carries the bearer
+# token as one, so a token outside this set would fail at connect time with
+# nothing pointing at the cause. Refuse it at load instead.
+TOKEN_CHARS = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]*$")
 
 DEFAULTS = {
     "self_name": "fenrir",
@@ -32,6 +38,13 @@ class Config:
         merged["exec"] = {**DEFAULTS["exec"], **data.get("exec", {})}
         merged["gifterboard"] = {**DEFAULTS["gifterboard"], **data.get("gifterboard", {})}
         self._d = merged
+
+        if not TOKEN_CHARS.match(merged["token"] or ""):
+            raise SystemExit(
+                "token contains characters the WebSocket subprotocol grammar cannot "
+                "carry. Use A-Z a-z 0-9 and any of - . _ ~ (a hex or base64url "
+                "string is fine)."
+            )
 
         # Roots are resolved once, at load. Every later path check compares
         # against these resolved absolutes, so a symlink or a "..\" in a request
