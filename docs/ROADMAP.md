@@ -247,5 +247,10 @@ product.
 - **2026-09-17** — The WebSocket token moves from the query string to the
   `Sec-WebSocket-Protocol` header (B3b) rather than to a ticket endpoint: it
   needs no new route, no expiry logic, and `Monitor` can send it today.
+- **2026-09-17** — A frame written to a connected `/notify` socket under the
+  addressee's own name is consumed (B4). "Written" is kernel-buffer, not
+  processed, so a half-open connection can lose one frame from the inbox
+  (history keeps it). Chosen over the alternative, which replayed everything
+  on every reconnect. Revisit only if a lost frame is actually observed.
 - **2026-09-17** — JSON store stays through Sprint 1 (B6 stopgap); SQLite is
   P3, not earlier, because identity work (S1) changes the schema.
