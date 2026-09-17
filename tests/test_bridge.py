@@ -59,6 +59,58 @@ def test_root_prefix_resolves_and_reads(tree):
     assert out["total_lines"] == 2
 
 
+def test_a_slice_of_a_large_file_does_not_load_the_file(tree):
+    # Regression: any count>0 read the whole file and then sliced it, so the
+    # size cap only ever applied to count=0. A 2 GB file with count=1 was a
+    # 2 GB read.
+    import tracemalloc
+    root, _ = tree
+    big = root / "src" / "big.log"
+    with big.open("w") as f:
+        for i in range(200_000):
+            f.write(f"line {i} " + "x" * 40 + "\n")     # ~10 MB
+    size = big.stat().st_size
+    assert size > 8_000_000
+
+    f = Files({"proj": root}, max_read_bytes=256 * 1024)
+    tracemalloc.start()
+    out = f.read("proj:src/big.log", start=100_001, count=5)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert out["returned"] == 5
+    assert out["text"].splitlines()[0].startswith("100001\tline 100000 ")
+    assert out["total_lines"] == 200_000
+    assert peak < size // 4, f"peak {peak} bytes for a 5-line slice of a {size}-byte file"
+
+
+def test_whole_file_over_the_cap_is_still_refused(tree):
+    root, _ = tree
+    (root / "src" / "fat.txt").write_text("y" * 3000)
+    f = Files({"proj": root}, max_read_bytes=2000)
+    with pytest.raises(PathDenied, match="over the 2000 limit"):
+        f.read("proj:src/fat.txt")
+
+
+def test_a_slice_is_capped_by_bytes_not_only_by_count(tree):
+    root, _ = tree
+    (root / "src" / "wide.txt").write_text("\n".join("a" * 100 for _ in range(50)))
+    f = Files({"proj": root}, max_read_bytes=350)
+    out = f.read("proj:src/wide.txt", start=1, count=50)
+    assert out["truncated"] is True
+    assert out["returned"] == 3                           # 3 x 101 bytes fits, 4 does not
+    assert "next line is 4" in out["note"]
+    assert out["total_lines"] == 50                       # still counted to the end
+
+
+def test_crlf_files_read_the_same_as_lf(tree):
+    root, _ = tree
+    (root / "src" / "win.txt").write_bytes(b"one\r\ntwo\r\nthree")
+    out = Files({"proj": root}).read("proj:src/win.txt")
+    assert out["total_lines"] == 3
+    assert out["text"] == "1\tone\n2\ttwo\n3\tthree"
+
+
 def test_unknown_root_names_the_known_ones(tree):
     root, _ = tree
     f = Files({"proj": root})

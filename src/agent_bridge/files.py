@@ -102,6 +102,11 @@ class Files:
                 return name
         return base.name
 
+    # Streams the file rather than loading it. The size cap used to apply only
+    # when the whole file was asked for; any count>0 read the entire file into
+    # memory and then sliced it, so a 2 GB file with count=1 was a 2 GB read.
+    # Now only the requested lines are ever held, and the cap applies to what
+    # is returned, however the request was phrased.
     def read(self, path: str, start: int = 1, count: int = 0) -> dict:
         target = self.resolve(path)
         if not target.is_file():
@@ -112,17 +117,38 @@ class Files:
                 f"{target.name} is {size} bytes, over the {self.max_read_bytes} limit. "
                 "Pass start/count to read a slice."
             )
-        text = target.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines()
-        start = max(1, start)
-        chunk = lines[start - 1:(start - 1 + count) if count else None]
-        return {
+
+        start = max(1, int(start))
+        stop = start + count if count else None          # exclusive, 1-based
+        chunk: list[str] = []
+        chunk_bytes = 0
+        truncated = False
+        total = 0
+        with target.open(encoding="utf-8", errors="replace", newline="") as f:
+            for total, raw in enumerate(f, start=1):
+                if total < start or (stop is not None and total >= stop):
+                    continue
+                if truncated:
+                    continue                             # still counting lines
+                line = raw.rstrip("\r\n")
+                chunk_bytes += len(line) + 1
+                if chunk_bytes > self.max_read_bytes:
+                    truncated = True
+                    continue
+                chunk.append(line)
+
+        out = {
             "path": str(target),
-            "total_lines": len(lines),
+            "total_lines": total,
             "start": start,
             "returned": len(chunk),
             "text": "\n".join(f"{start + i}\t{ln}" for i, ln in enumerate(chunk)),
         }
+        if truncated:
+            out["truncated"] = True
+            out["note"] = (f"stopped at {self.max_read_bytes} bytes; the next line is "
+                           f"{start + len(chunk)}. Ask for a smaller count.")
+        return out
 
     # Async, because the MCP SDK calls a plain function inline on the event
     # loop. A grep that takes ten seconds used to stall the WebSocket, the

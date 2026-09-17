@@ -75,7 +75,7 @@ product.
   *AC:* extend `test_ws_backlog_marked_read_is_not_replayed_after_restart`
   with a live message.
 
-- [ ] **B5 `bridge_read` size cap bypassed by `count > 0`** (S)
+- [x] **B5 `bridge_read` size cap bypassed by `count > 0`** (S)
   Whole file is read into memory regardless. Iterate lines and stop at
   `start + count`; enforce `max_read_bytes` on the *returned* slice.
   *AC:* a 10 MB fixture with `count=5` returns 5 lines and peak memory does
