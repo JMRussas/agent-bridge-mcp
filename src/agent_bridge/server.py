@@ -19,7 +19,6 @@
 # Either way the token is in a header, never in the URL. No TLS is the reason
 # this binds to a LAN address and not to the internet.
 
-import argparse
 import asyncio
 import hmac
 import logging
@@ -583,20 +582,34 @@ def _frame(msg, pending: bool = False) -> str:
     return f"{head}: {msg.text}"
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(prog="agent-bridge-mcp")
-    ap.add_argument("--config", default=None)
-    ap.add_argument("--host", default=None)
-    ap.add_argument("--port", type=int, default=None)
-    args = ap.parse_args()
+LOOPBACK = ("127.", "::1", "localhost")
+PLACEHOLDER_TOKENS = {"", "CHANGE_ME", "changeme", "change-me"}
 
+
+# A copied example config has "CHANGE_ME" in it, and the old behaviour was to
+# warn and bind anyway - on 0.0.0.0, the default. This server reads source and
+# runs commands; an open bind is refused, not logged. Loopback with no token is
+# still allowed, because that is how a single-machine setup works.
+def refuse_open_bind(host: str, token: str) -> None:
+    if token in PLACEHOLDER_TOKENS and not host.startswith(LOOPBACK):
+        what = "no token" if not token else "the placeholder token"
+        raise SystemExit(
+            f"refusing to bind {host} with {what}: every machine that can reach "
+            "this port could read source and run commands. Run 'agent-bridge init' "
+            "to generate one, or set host to 127.0.0.1."
+        )
+
+
+def serve(config: str | None = None, host: str | None = None, port: int | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
-    cfg = Config.load(args.config)
-    if not cfg.token:
-        log.warning("no token set - every peer on the LAN can use this bridge")
+    cfg = Config.load(config)
 
-    host = args.host or cfg.host
-    port = args.port or int(cfg.port)
+    host = host or cfg.host
+    port = port or int(cfg.port)
+    refuse_open_bind(host, cfg.token)
+    if not cfg.token:
+        log.warning("no token set - anything on this machine can use this bridge")
+
     log.info("agent-bridge '%s' on http://%s:%d  (mcp=/mcp  ws=/notify  rest=/api)",
              cfg.self_name, host, port)
     for name, path in cfg.roots.items():
@@ -604,6 +617,12 @@ def main() -> None:
     log.info("  allowed Host headers: %s", ", ".join(allowed_hosts(cfg)))
 
     uvicorn.run(build(cfg), host=host, port=port, log_level="warning")
+    return 0
+
+
+def main() -> None:
+    from agent_bridge.cli import main as cli_main
+    raise SystemExit(cli_main())
 
 
 if __name__ == "__main__":
