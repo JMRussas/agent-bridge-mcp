@@ -531,19 +531,28 @@ def build(cfg: Config):
         # and this server reconnects often. Marking read before sending would be
         # the opposite bug: a send that fails would drop the message silently.
         backlog = box.inbox(agent, limit=20, peek=True)
+        sent: list = []
         try:
             for m in backlog:
                 await ws.send_text(_frame(m, pending=True))
-                m.read = True
-            if backlog:
-                box.flush()
+                sent.append(m)
+            box.mark_read(*sent)
             # No application-level keepalive on purpose. Every text frame this
             # socket sends becomes a notification in the listening agent's
             # session, so a heartbeat would interrupt it on a timer for no
             # information. uvicorn sends protocol-level pings already, which
             # keep the connection alive without waking anyone.
+            #
+            # A live frame is marked read the same way the backlog is - after
+            # the send. Left unread, every message delivered here came back as
+            # "[unread backlog]" on the next reconnect. Only the addressee's
+            # own mail is consumed: a wildcard listener sees everything but
+            # must not eat another agent's inbox.
             while True:
-                await ws.send_text(_frame(await q.get()))
+                m = await q.get()
+                await ws.send_text(_frame(m))
+                if m.to == agent:
+                    box.mark_read(m)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:

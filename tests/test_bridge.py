@@ -400,9 +400,7 @@ def test_ws_backlog_marked_read_is_not_replayed_after_restart(tmp_path):
 
     backlog = box.inbox("fenrir", peek=True)
     assert len(backlog) == 1
-    for m in backlog:          # what notify() does once the frame is sent
-        m.read = True
-    box.flush()
+    box.mark_read(*backlog)    # what notify() does once the frame is sent
 
     assert Mailbox(store=store).inbox("fenrir", peek=True) == []
 

@@ -68,6 +68,33 @@ def test_websocket_accepts_the_token_as_a_subprotocol(client):
         assert ws.receive_text().endswith("a -> x: ping")
 
 
+def test_a_live_frame_is_consumed_and_not_replayed_on_reconnect(client):
+    # Regression: only the backlog was marked read after send. A message
+    # delivered live stayed unread, so every reconnect replayed it as
+    # "[unread backlog]".
+    with client.websocket_connect("/notify?agent=x", headers=BEARER) as ws:
+        client.post("/api/send", json={"sender": "a", "to": "x", "text": "live one"},
+                    headers=BEARER)
+        assert ws.receive_text().endswith("a -> x: live one")
+
+    assert client.get("/api/inbox?agent=x&peek=1", headers=BEARER).json()["count"] == 0
+    # Reconnect: nothing pending, so a fresh message is the first frame.
+    with client.websocket_connect("/notify?agent=x", headers=BEARER) as ws:
+        client.post("/api/send", json={"sender": "a", "to": "x", "text": "second"},
+                    headers=BEARER)
+        frame = ws.receive_text()
+        assert "second" in frame and "backlog" not in frame
+
+
+def test_a_wildcard_listener_does_not_consume_another_agents_mail(client):
+    with client.websocket_connect("/notify?agent=*", headers=BEARER) as ws:
+        client.post("/api/send", json={"sender": "a", "to": "y", "text": "for y"},
+                    headers=BEARER)
+        assert "for y" in ws.receive_text()
+    # y still has it.
+    assert client.get("/api/inbox?agent=y&peek=1", headers=BEARER).json()["count"] == 1
+
+
 def test_websocket_refuses_the_token_in_the_query_string(client):
     with pytest.raises(WebSocketDenialResponse) as exc:
         with client.websocket_connect(f"/notify?agent=x&token={TOKEN}"):

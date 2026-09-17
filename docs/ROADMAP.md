@@ -68,7 +68,7 @@ product.
   placeholder token. Pulled forward from S4 and P1 because "how would someone
   set the token?" had no good answer.
 
-- [ ] **B4 live WebSocket frames are never marked read** (S)
+- [x] **B4 live WebSocket frames are never marked read** (S)
   The backlog loop marks read after send; the steady-state loop does not, so
   every live message replays as `[unread backlog]` on reconnect. Mark read
   after `send_text` succeeds and `flush()`.
