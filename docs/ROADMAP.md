@@ -50,6 +50,17 @@ product.
   needs it. Accept the query form on `/notify` only.
   *AC:* `GET /api/inbox?token=<good>` → 401; `ws://…/notify?token=<good>` → 101.
 
+- [x] **B3b get the token out of the URL entirely** (S)
+  The query form existed because Claude Code's `Monitor` ws config has no
+  header field - but it has `protocols`, and `Sec-WebSocket-Protocol` is a
+  header. `/notify` takes `protocols: ["bridge", "bearer.<token>"]` (the
+  Kubernetes pattern), selects `bridge`, and `?token=` is removed. `?agent=`
+  stays; it is not secret. Config validation refuses a token outside the
+  subprotocol grammar so the mismatch cannot surface at connect time.
+  *AC:* `?token=` → 401 everywhere; subprotocol token → 101 with
+  `Sec-WebSocket-Protocol: bridge` in the response; verified against real
+  uvicorn, not just TestClient.
+
 - [ ] **B4 live WebSocket frames are never marked read** (S)
   The backlog loop marks read after send; the steady-state loop does not, so
   every live message replays as `[unread backlog]` on reconnect. Mark read
@@ -227,5 +238,8 @@ product.
   be deleted.
 - **2026-09-17** — TLS is out of scope; overlay network is the documented
   answer. Revisit only if a user cannot run one.
+- **2026-09-17** — The WebSocket token moves from the query string to the
+  `Sec-WebSocket-Protocol` header (B3b) rather than to a ticket endpoint: it
+  needs no new route, no expiry logic, and `Monitor` can send it today.
 - **2026-09-17** — JSON store stays through Sprint 1 (B6 stopgap); SQLite is
   P3, not earlier, because identity work (S1) changes the schema.

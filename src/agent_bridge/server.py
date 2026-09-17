@@ -13,10 +13,11 @@
 # to curl - so /api is how the agent on THIS machine answers a message the
 # moment the bridge comes up, rather than after a restart.
 #
-# Auth: bearer token on HTTP. The WebSocket takes it as a query parameter
-# instead, because the client that consumes /notify configures a URL and has
-# nowhere to put a header. That is a real weakening (URLs land in logs), and it
-# is why this binds to a LAN address and not to the internet.
+# Auth: bearer token in the Authorization header on HTTP. The WebSocket may
+# carry it as a subprotocol instead (see WS_PROTOCOL below), because the client
+# that consumes /notify configures a URL and a protocol list and nothing else.
+# Either way the token is in a header, never in the URL. No TLS is the reason
+# this binds to a LAN address and not to the internet.
 
 import argparse
 import asyncio
@@ -46,12 +47,22 @@ log = logging.getLogger("agent-bridge")
 
 OPEN_PATHS = ("/api/health",)
 
+# The WebSocket carries its token as a subprotocol, because the one client that
+# consumes /notify (Claude Code's Monitor) configures a URL plus a list of
+# protocols and nothing else. Sec-WebSocket-Protocol is a request header, so the
+# token stays out of access logs, which the old ?token= form did not. The
+# client offers ["bridge", "bearer.<token>"]; we verify the second and select
+# the first. Same trick Kubernetes uses for kubectl exec.
+WS_PROTOCOL = "bridge"
+WS_BEARER_PREFIX = "bearer."
+
 
 def UNAUTHORISED() -> JSONResponse:
     return JSONResponse({
         "error": "bad or missing token",
-        "hint": "send it as 'Authorization: Bearer <token>'. The ?token= query "
-                "form is accepted on the /notify WebSocket only.",
+        "hint": "send it as 'Authorization: Bearer <token>'. On the /notify "
+                "WebSocket it may instead be a subprotocol: offer "
+                "['bridge', 'bearer.<token>'].",
     }, status_code=401)
 
 
@@ -256,19 +267,21 @@ def build(cfg: Config):
                 "what": "A WebSocket that pushes each message addressed to you as "
                         "ONE text frame, so you are told rather than polling "
                         "bridge_inbox. Any peer may subscribe under any agent name.",
-                "url": f"ws://<this-host>:{cfg.port}/notify?agent=<your-name>&token=<token>",
-                "note": "The token goes in the query string because a WebSocket "
-                        "client config has nowhere to put a header. Unread "
-                        "messages are replayed on connect, so subscribing late "
-                        "does not miss what prompted you to connect. There is no "
-                        "application keepalive by design - every text frame is a "
-                        "real message.",
-                "in_claude_code": "Monitor(ws={url: '...'}, persistent: true)",
+                "url": f"ws://<this-host>:{cfg.port}/notify?agent=<your-name>",
+                "auth": "Offer subprotocols ['bridge', 'bearer.<token>'] (the "
+                        "Sec-WebSocket-Protocol header), or send Authorization: "
+                        "Bearer if your client can. The token is never in the URL.",
+                "note": "Unread messages are replayed on connect, so subscribing "
+                        "late does not miss what prompted you to connect. There is "
+                        "no application keepalive by design - every text frame is "
+                        "a real message.",
+                "in_claude_code": "Monitor(ws={url: '...', protocols: ['bridge', "
+                                  "'bearer.<token>']}, ...)",
                 "IF THAT IS BLOCKED": "Claude Code's Monitor refuses WebSockets to private-range addresses, which makes /notify unusable across a LAN. Use bridge_wait() instead - it blocks until a message arrives and returns the same latency without a socket.",
             },
             "rest": {
                 "auth": "Authorization: Bearer <token> header on every route except "
-                        "/api/health. The ?token= form works on /notify only.",
+                        "/api/health.",
                 "GET  /api/health": "unauthenticated; reports host_seen, host_allowed, "
                                     "your_address - use it to tell a firewall problem "
                                     "from a token problem from a Host-allowlist 421",
@@ -418,18 +431,13 @@ def build(cfg: Config):
 
     # --- HTTP app ----------------------------------------------------------
 
-    # The query-string form exists for ONE client: the WebSocket consumer, whose
-    # config is a URL with nowhere to put a header. It used to be accepted on
-    # every route, which meant `curl "/api/inbox?token=..."` worked and the
-    # token landed in any access log between the peer and this box. HTTP
-    # routes take the header only.
-    def authorised(request_or_ws, allow_query: bool = False) -> bool:
+    def authorised(request_or_ws, allow_subprotocol: bool = False) -> bool:
         if not cfg.token:
             return True
         header = request_or_ws.headers.get("authorization", "")
         supplied = header[7:] if header.lower().startswith("bearer ") else ""
-        if not supplied and allow_query:
-            supplied = request_or_ws.query_params.get("token", "")
+        if not supplied and allow_subprotocol:
+            supplied = _bearer_from_subprotocols(request_or_ws)
         return hmac.compare_digest(supplied, cfg.token)
 
     class Auth(BaseHTTPMiddleware):
@@ -500,14 +508,18 @@ def build(cfg: Config):
                              "messages": [m.as_dict() for m in msgs]})
 
     async def notify(ws: WebSocket):
-        if not authorised(ws, allow_query=True):
+        if not authorised(ws, allow_subprotocol=True):
             # A close before accept is rewritten by uvicorn into a bare 403
             # handshake rejection, which a client cannot tell from a proxy
             # refusing it. Deny the handshake with the same 401 body HTTP gets.
             await ws.send_denial_response(UNAUTHORISED())
             return
         agent = (ws.query_params.get("agent") or cfg.self_name).lower()
-        await ws.accept()
+        # Select "bridge" if it was offered. A client that offered only the
+        # bearer entry gets no protocol echoed back, which some clients treat
+        # as a failed handshake - hence the docs say to offer both.
+        offered = _subprotocols(ws)
+        await ws.accept(subprotocol=WS_PROTOCOL if WS_PROTOCOL in offered else None)
         q = box.subscribe(agent)
 
         # Anything already waiting is replayed first, so connecting late does not
@@ -546,6 +558,18 @@ def build(cfg: Config):
     app.routes.append(Route("/api/wait", api_wait, methods=["GET"]))
     app.add_middleware(Auth)
     return app
+
+
+def _subprotocols(ws) -> list[str]:
+    raw = ws.headers.get("sec-websocket-protocol", "")
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _bearer_from_subprotocols(ws) -> str:
+    for p in _subprotocols(ws):
+        if p.startswith(WS_BEARER_PREFIX):
+            return p[len(WS_BEARER_PREFIX):]
+    return ""
 
 
 def _frame(msg, pending: bool = False) -> str:
