@@ -9,3 +9,4 @@ server.err
 server.pid
 mailbox.json
 mailbox.json.tmp
+out/

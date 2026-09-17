@@ -34,7 +34,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from agent_bridge.avatar import Avatars
+from agent_bridge.avatar import Avatars, OutputDenied
 from agent_bridge.config import Config
 from agent_bridge.execute import ExecDenied, Runner
 from agent_bridge.files import Files, PathDenied
@@ -88,15 +88,17 @@ def _host_ok(host: str, allowed: list[str]) -> bool:
 
 
 def build(cfg: Config):
-    # A relative store sits beside config.json, not beside whatever directory the
-    # service happened to be started from.
-    store = cfg.mailbox_store
-    if store and not Path(store).is_absolute():
-        store = Path(__file__).resolve().parents[2] / store
-    box = Mailbox(capacity=int(cfg.inbox_max), store=store or None)
+    # A relative store or output directory sits beside config.json, not beside
+    # whatever directory the service happened to be started from.
+    def beside_config(p: str) -> Path | None:
+        if not p:
+            return None
+        return Path(p) if Path(p).is_absolute() else Path(__file__).resolve().parents[2] / p
+
+    box = Mailbox(capacity=int(cfg.inbox_max), store=beside_config(cfg.mailbox_store))
     files = Files(cfg.roots, int(cfg.max_read_bytes))
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
-    avatars = Avatars(cfg.gifterboard, cfg.roots)
+    avatars = Avatars(cfg.gifterboard, cfg.roots, output_dir=beside_config(cfg.output_dir))
     logs = Logs(cfg.roots)
 
     hosts = allowed_hosts(cfg)
@@ -386,9 +388,15 @@ def build(cfg: Config):
 
     @mcp.tool()
     async def avatar_png(uid: str, out_path: str, size: int = 0, creator: str = "") -> dict:
-        """Write a viewer's decoded avatar to a PNG so it can be looked at."""
+        """Write a viewer's decoded avatar to a PNG so it can be looked at.
+
+        `out_path` is relative to this bridge's output directory and must end
+        in .png; nothing outside that directory is ever written.
+        """
         try:
             return await avatars.to_png(uid, out_path, size, creator)
+        except OutputDenied as e:
+            return {"error": str(e), "output_dir": str(avatars.output_dir)}
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
 
