@@ -435,19 +435,32 @@ async def test_png_lands_under_the_output_dir(avatars, tmp_path):
     assert Path(res["path"]).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
-@pytest.mark.parametrize("bad", [
-    "../../x.png",                       # relative escape
-    "..\escaped.png",                   # backslash spelling of the same
-    "{abs}/elsewhere.png",               # absolute path outside the dir
-    "inside.cs",                         # right place, wrong kind of file
-    "inside.png.ps1",                    # suffix that only looks like png
-    "",
+@pytest.mark.parametrize("bad, would_land", [
+    ("../../x.png", "x.png"),                  # relative escape -> tmp_path.parent
+    (r"..\..\escaped.png", "escaped.png"),     # backslash spelling of the same
+    ("{abs}/elsewhere.png", "elsewhere.png"),  # absolute path outside the dir
+    ("inside.cs", None),                       # right place, wrong kind of file
+    ("inside.png.ps1", None),                  # suffix that only looks like png
+    ("evil.ps1:x.png", None),                  # NTFS alternate data stream
+    ("", None),
 ])
-async def test_writes_outside_or_not_png_are_refused(avatars, tmp_path, bad):
+async def test_writes_outside_or_not_png_are_refused(avatars, tmp_path, bad, would_land):
     with pytest.raises(OutputDenied):
         await avatars.to_png("uid", bad.format(abs=tmp_path.as_posix()))
-    assert not (tmp_path / "x.png").exists()
-    assert not (tmp_path / "elsewhere.png").exists()
+    # Check where each escape would actually have resolved to, not a guess.
+    if would_land:
+        assert not (tmp_path.parent / would_land).exists()
+        assert not (tmp_path / would_land).exists()
+    out = tmp_path / "out"
+    assert not out.exists() or not list(out.rglob("*")), "something landed in out/"
+
+
+async def test_denied_path_never_reaches_the_network(avatars):
+    async def explode(*a, **k):
+        raise AssertionError("fetch was called for a path that should have been refused")
+    avatars.fetch = explode
+    with pytest.raises(OutputDenied):
+        await avatars.to_png("uid", "../nope.png")
 
 
 async def test_absolute_path_inside_output_dir_is_fine(avatars, tmp_path):

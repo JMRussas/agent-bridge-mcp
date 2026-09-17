@@ -172,12 +172,14 @@ class Avatars:
         return result
 
     async def to_png(self, uid: str, out_path: str, size: int = 0, creator: str = "") -> dict:
+        # Check the destination before the fetch, so a refused path is reported
+        # as such rather than masked by whatever the server happened to return.
+        p = self._output_path(out_path)
         body, meta = await self.fetch(uid, size, creator)
         size = meta["requested_size"]
         if len(body) != size * size * 4:
             return {**meta, "written": False,
                     "error": f"body is {len(body)} bytes, not {size * size * 4} - nothing to render"}
-        p = self._output_path(out_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(rgba_to_png(body, size, size))
         return {**meta, "written": True, "path": str(p), "bytes": p.stat().st_size}
@@ -198,6 +200,11 @@ class Avatars:
 
         candidate = Path(raw)
         target = (candidate if candidate.is_absolute() else self.output_dir / candidate).resolve()
+        # NTFS alternate data streams: "evil.ps1:x.png" ends in .png and resolves
+        # inside the directory, but the file that appears is evil.ps1. The
+        # suffix check has to be on the name the filesystem will use.
+        if ":" in target.name or not target.name.lower().endswith(".png"):
+            raise OutputDenied(f"'{target.name}' is not a plain .png filename")
         if self.output_dir not in target.parents:
             raise OutputDenied(
                 f"out_path resolves outside the output directory: {target}. "
