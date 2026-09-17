@@ -45,7 +45,7 @@ product.
   *AC:* a test opens `/api/wait`, starts a slow grep, and the wait still
   returns a message posted during the grep.
 
-- [ ] **B3 token accepted in the query string on plain HTTP** (S)
+- [x] **B3 token accepted in the query string on plain HTTP** (S)
   `authorised()` falls back to `?token=` for every route. Only the WebSocket
   needs it. Accept the query form on `/notify` only.
   *AC:* `GET /api/inbox?token=<good>` → 401; `ws://…/notify?token=<good>` → 101.
@@ -133,10 +133,11 @@ product.
   `your_address` only. Roots, peers and unread counts move behind auth
   (`/api/peers` already exists).
 
-- [ ] **S8 auth-boundary tests over HTTP** (M)
+- [~] **S8 auth-boundary tests over HTTP** (M)
   Starlette `TestClient` suite: 401 on every route without a token, 200
   with, health open, WebSocket 4401/101, B3 and S1 behaviours. This is the
-  layer where a regression is a security bug, and today it has no tests.
+  layer where a regression is a security bug. *Started in B3
+  (`tests/test_http.py`); grows with each Sprint 1 story.*
 
 ## Sprint 2 — make it not-about-Rogue-Lite
 

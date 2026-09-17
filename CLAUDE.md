@@ -17,8 +17,8 @@ nothing checks it, which is what this bridge exists to fix.
 | Status | `tools\bridge.ps1 status` |
 | Stop / restart | `tools\bridge.ps1 stop` / `restart` |
 | Open the LAN port | `tools\bridge.ps1 firewall` (**elevated shell**) |
-| Tests | `.venv\Scripts\python.exe -m pytest tests\ -q` |
-| Install | `uv venv .venv; uv pip install --python .venv\Scripts\python.exe -e .` |
+| Tests | `.venv\Scripts\python.exe -m pytest tests\ -q` (warnings are errors) |
+| Install | `uv venv .venv; uv pip install --python .venv\Scripts\python.exe -e .[dev]` |
 
 Logs are `server.log` / `server.err` next to `config.json`. A silent failure to
 start is almost always the port already being held — `status` says so.
@@ -89,7 +89,9 @@ the implementation:
   protocol-level pings keep the socket alive instead.
 - **The token goes in the query string**, because a `Monitor` ws config accepts
   a URL and has nowhere to put a header. URLs land in logs, which is a real
-  weakening — and the reason this binds to the LAN and not the internet.
+  weakening — and the reason this binds to the LAN and not the internet. The
+  query form is accepted on `/notify` **only**; every HTTP route takes the
+  `Authorization: Bearer` header and nothing else.
 
 ## Tools
 
