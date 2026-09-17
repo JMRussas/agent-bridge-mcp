@@ -390,6 +390,31 @@ def test_wait_times_out_cleanly_with_no_mail():
     asyncio.run(go())
 
 
+async def test_wait_returns_the_message_even_if_a_socket_consumed_it_first():
+    # Regression: /notify and wait share the fan-out. When the socket's send
+    # completed and marked the message read before the waiter re-read the
+    # inbox, the waiter answered "mail arrived" with an empty list.
+    box = Mailbox()
+    task = asyncio.create_task(box.wait("x", 2.0))
+    await asyncio.sleep(0)                       # the waiter is now subscribed
+    msg = box.post("a", "x", "hi")
+    box.mark_read(msg)                           # what the socket does after send
+    msgs, timed_out = await task
+    assert not timed_out
+    assert msgs == [msg]
+
+
+async def test_wait_does_not_adopt_someone_elses_message_from_a_wildcard_wake():
+    box = Mailbox()
+    task = asyncio.create_task(box.wait("*", 0.3))
+    await asyncio.sleep(0)
+    box.post("a", "y", "for y")
+    msgs, timed_out = await task
+    # Woken, but "*" has no inbox of its own and must not claim y's mail.
+    assert not timed_out and msgs == []
+    assert box.unread_count("y") == 1
+
+
 def test_ws_backlog_marked_read_is_not_replayed_after_restart(tmp_path):
     # Regression: the /notify backlog peeked without consuming, so a listener
     # that reads its mail from the socket never marked anything read and every
@@ -400,9 +425,7 @@ def test_ws_backlog_marked_read_is_not_replayed_after_restart(tmp_path):
 
     backlog = box.inbox("fenrir", peek=True)
     assert len(backlog) == 1
-    for m in backlog:          # what notify() does once the frame is sent
-        m.read = True
-    box.flush()
+    box.mark_read(*backlog)    # what notify() does once the frame is sent
 
     assert Mailbox(store=store).inbox("fenrir", peek=True) == []
 
