@@ -15,12 +15,14 @@
 # `list[Path]` annotation resolves to the method and raises at import.
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shutil
-import subprocess
 from fnmatch import fnmatch
 from pathlib import Path
+
+import anyio
 
 # Anything here is either huge, binary, or someone's credentials. Skipped by
 # list and grep, and refused by read.
@@ -122,8 +124,12 @@ class Files:
             "text": "\n".join(f"{start + i}\t{ln}" for i, ln in enumerate(chunk)),
         }
 
-    def grep(self, pattern: str, root: str = "", glob: str = "", limit: int = 100,
-             context: int = 0, ignore_case: bool = False) -> dict:
+    # Async, because the MCP SDK calls a plain function inline on the event
+    # loop. A grep that takes ten seconds used to stall the WebSocket, the
+    # long-poll and every other session for those ten seconds. ripgrep now runs
+    # as an awaited subprocess and the Python fallback in a worker thread.
+    async def grep(self, pattern: str, root: str = "", glob: str = "", limit: int = 100,
+                   context: int = 0, ignore_case: bool = False) -> dict:
         bases = ([self.roots[root.lower()]] if root and root.lower() in self.roots
                  else list(self.roots.values()))
         rg = shutil.which("rg")
@@ -132,7 +138,8 @@ class Files:
             # bundles, behind a versioned directory name that would rot. Scanning
             # in Python is slower and always there, which is the better trade for
             # two source trees.
-            return self._grep_python(pattern, bases, glob, limit, context, ignore_case)
+            return await anyio.to_thread.run_sync(
+                self._grep_python, pattern, bases, glob, limit, context, ignore_case)
 
         args = [rg, "--line-number", "--no-heading", "--color", "never",
                 "--max-count", "50", "--threads", "4"]
@@ -146,12 +153,16 @@ class Files:
             args += ["--glob", f"!**/{part}/**"]
         args += ["--regexp", pattern, *[str(b) for b in bases]]
 
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         try:
-            proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
             return {"error": "grep timed out after 60s", "matches": []}
 
-        out = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        out = [ln for ln in stdout.decode("utf-8", errors="replace").splitlines() if ln.strip()]
         truncated = len(out) > limit
         return {"matches": out[:limit], "count": min(len(out), limit),
                 "truncated": truncated, "pattern": pattern, "engine": "ripgrep"}

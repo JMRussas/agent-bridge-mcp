@@ -36,7 +36,7 @@ product.
   deny-list check, refuse anything that resolves outside.
   *AC:* `to_png(out_path="../../x.cs")` returns an error; test covers it.
 
-- [ ] **B2 sync tools block the event loop** (M)
+- [x] **B2 sync tools block the event loop** (M)
   The SDK calls non-async tools inline. `bridge_grep`, `bridge_list`,
   `bridge_read`, `logs_list`, `logs_read`, `avatar_contract` all do file I/O
   or spawn a subprocess. Make each `async` and run the body under

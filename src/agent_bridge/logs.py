@@ -40,6 +40,11 @@ EXE_NAMES = ("RogueLite.exe", "roguelite.exe", "RogueLite.dll")
 MAX_TAIL = 2000
 
 
+def _count_lines(path: Path) -> int:
+    with path.open(encoding="utf-8", errors="replace") as f:
+        return sum(1 for _ in f)
+
+
 class Logs:
     def __init__(self, roots: dict[str, Path]):
         self.roots = roots
@@ -91,7 +96,7 @@ class Logs:
                 "bytes": st.st_size,
                 "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
                 "age_s": round(now - st.st_mtime),
-                "lines": sum(1 for _ in path.open(encoding="utf-8", errors="replace")),
+                "lines": _count_lines(path),
                 **self._build_note(path, path.parent),
             })
 

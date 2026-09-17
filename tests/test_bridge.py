@@ -472,3 +472,43 @@ async def test_no_output_dir_means_no_writes_at_all(tmp_path):
     a = Avatars({"url": "http://unused"}, {}, output_dir=None)
     with pytest.raises(OutputDenied, match="disabled"):
         a._output_path("anything.png")
+
+
+# --- the event loop stays free during slow I/O ------------------------------
+#
+# Regression: the SDK calls a plain-function tool inline on the loop, so a grep
+# or directory walk stalled the WebSocket, the long-poll and every other session
+# until it finished. The I/O tools now run their bodies off the loop.
+
+import shutil
+import time
+
+
+async def test_a_slow_grep_does_not_stall_the_mailbox(tree, monkeypatch):
+    root, _ = tree
+    f = Files({"proj": root})
+    monkeypatch.setattr("agent_bridge.files.shutil.which", lambda _: None)
+
+    def slow_scan(*a, **k):
+        time.sleep(0.6)
+        return {"matches": [], "count": 0, "truncated": False, "engine": "python"}
+    monkeypatch.setattr(f, "_grep_python", slow_scan)
+
+    box = Mailbox()
+    q = box.subscribe("x")
+    grep_task = asyncio.create_task(f.grep("anything"))
+    await asyncio.sleep(0.05)                      # the scan is now in its thread
+    box.post("a", "x", "hello")
+    # Blocked loop: this would only resolve once the 0.6 s scan returned.
+    msg = await asyncio.wait_for(q.get(), timeout=0.2)
+    assert msg.text == "hello"
+    assert not grep_task.done()
+    assert (await grep_task)["engine"] == "python"
+
+
+@pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep not on PATH")
+async def test_ripgrep_path_is_awaited(tree):
+    root, _ = tree
+    res = await Files({"proj": root}).grep("AvatarSize")
+    assert res["engine"] == "ripgrep"
+    assert res["count"] == 1 and "node_modules" not in res["matches"][0]
