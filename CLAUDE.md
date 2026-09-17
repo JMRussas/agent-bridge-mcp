@@ -145,6 +145,10 @@ not a wrapper around it:
    private-profile LAN interface.
 5. `.env`, `config.json` and credentials files are on a deny list, and
    `node_modules`/`.git`/`bin`/`obj` are skipped by list, grep and read.
+6. **The one tool that writes (`avatar_png`) is confined to `output_dir`**
+   (default `out/` beside `config.json`) and to `.png` names. It used to take
+   an arbitrary absolute path, which made a read-only bridge able to overwrite
+   any file the server's user could.
 
 The token is a shared secret in `config.json` (gitignored). Rotating it means
 editing that file and re-running `claude mcp add` on every peer.

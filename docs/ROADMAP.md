@@ -30,7 +30,7 @@ product.
 
 ## Sprint 0 — bugs found in review (ship before anyone else runs this)
 
-- [ ] **B1 `avatar_png` writes anywhere on disk** (S)
+- [x] **B1 `avatar_png` writes anywhere on disk** (S)
   `Avatars.to_png` resolves a caller-supplied `out_path` and writes it. Confine
   it to a configured `output_dir` (default: `<store dir>/out`), reuse the
   deny-list check, refuse anything that resolves outside.

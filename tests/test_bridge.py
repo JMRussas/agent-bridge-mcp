@@ -405,3 +405,57 @@ def test_ws_backlog_marked_read_is_not_replayed_after_restart(tmp_path):
     box.flush()
 
     assert Mailbox(store=store).inbox("fenrir", peek=True) == []
+
+
+# --- avatar_png output containment -----------------------------------------
+#
+# Regression: to_png used to write wherever the caller pointed it. On a bridge
+# whose whole posture is "read-only plus an allowlist", one tool that writes to
+# an arbitrary absolute path is a write primitive over the server's whole disk.
+
+from agent_bridge.avatar import Avatars, OutputDenied
+
+
+@pytest.fixture
+def avatars(tmp_path: Path):
+    a = Avatars({"url": "http://unused", "avatar_size": 2}, {}, output_dir=tmp_path / "out")
+
+    async def fake_fetch(uid, size=0, creator=""):
+        return (bytes([9, 9, 9, 255]) * 4,
+                {"url": "u", "status": 200, "content_type": "", "requested_size": 2})
+
+    a.fetch = fake_fetch
+    return a
+
+
+async def test_png_lands_under_the_output_dir(avatars, tmp_path):
+    res = await avatars.to_png("uid", "faces/one.png")
+    assert res["written"] is True
+    assert Path(res["path"]) == (tmp_path / "out" / "faces" / "one.png").resolve()
+    assert Path(res["path"]).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.parametrize("bad", [
+    "../../x.png",                       # relative escape
+    "..\escaped.png",                   # backslash spelling of the same
+    "{abs}/elsewhere.png",               # absolute path outside the dir
+    "inside.cs",                         # right place, wrong kind of file
+    "inside.png.ps1",                    # suffix that only looks like png
+    "",
+])
+async def test_writes_outside_or_not_png_are_refused(avatars, tmp_path, bad):
+    with pytest.raises(OutputDenied):
+        await avatars.to_png("uid", bad.format(abs=tmp_path.as_posix()))
+    assert not (tmp_path / "x.png").exists()
+    assert not (tmp_path / "elsewhere.png").exists()
+
+
+async def test_absolute_path_inside_output_dir_is_fine(avatars, tmp_path):
+    res = await avatars.to_png("uid", str(tmp_path / "out" / "abs.png"))
+    assert res["written"] is True
+
+
+async def test_no_output_dir_means_no_writes_at_all(tmp_path):
+    a = Avatars({"url": "http://unused"}, {}, output_dir=None)
+    with pytest.raises(OutputDenied, match="disabled"):
+        a._output_path("anything.png")

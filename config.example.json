@@ -14,6 +14,8 @@
   "inbox_max": 200,
   "//mailbox_store": "Where messages are persisted. Relative paths sit next to config.json. Set to \"\" to keep the mailbox in memory only, which loses unread mail on every restart.",
   "mailbox_store": "mailbox.json",
+  "//output_dir": "The only directory this bridge writes to (avatar_png). Relative paths sit next to config.json.",
+  "output_dir": "out",
   "exec": {
     "enabled": true,
     "timeout": 300,
