@@ -1,4 +1,6 @@
-from agent_bridge.server import main
+import sys
+
+from agent_bridge.cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

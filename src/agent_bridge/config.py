@@ -37,9 +37,12 @@ class Config:
         merged = {**DEFAULTS, **data}
         merged["exec"] = {**DEFAULTS["exec"], **data.get("exec", {})}
         merged["gifterboard"] = {**DEFAULTS["gifterboard"], **data.get("gifterboard", {})}
+        # A null token is no token. Left as None it would slip past every
+        # "is this a placeholder" check while authorised() treated it as open.
+        merged["token"] = merged.get("token") or ""
         self._d = merged
 
-        if not TOKEN_CHARS.match(merged["token"] or ""):
+        if not TOKEN_CHARS.match(merged["token"]):
             raise SystemExit(
                 "token contains characters the WebSocket subprotocol grammar cannot "
                 "carry. Use A-Z a-z 0-9 and any of - . _ ~ (a hex or base64url "
@@ -73,11 +76,15 @@ class Config:
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
-        p = Path(path or os.environ.get("AGENT_BRIDGE_CONFIG")
-                 or Path(__file__).resolve().parents[2] / "config.json")
+        p = Path(path) if path else default_config_path()
         if not p.exists():
             raise SystemExit(
                 f"config not found: {p}\n"
-                "Copy config.example.json to config.json and set a token."
+                "Run 'agent-bridge init' to write one with a generated token."
             )
         return cls(json.loads(p.read_text(encoding="utf-8")))
+
+
+def default_config_path() -> Path:
+    return Path(os.environ.get("AGENT_BRIDGE_CONFIG")
+                or Path(__file__).resolve().parents[2] / "config.json")

@@ -16,6 +16,9 @@ dependencies = [
     "websockets==15.0.1",
 ]
 
+[project.scripts]
+agent-bridge = "agent_bridge.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest==9.0.2",

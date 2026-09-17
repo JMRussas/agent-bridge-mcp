@@ -27,7 +27,8 @@ built to debug.
 ```powershell
 uv venv .venv
 uv pip install --python .venv\Scripts\python.exe -e .
-copy config.example.json config.json      # then set a token and your roots
+.venv\Scripts\agent-bridge init             # writes config.json with a generated token
+                                          # then add your roots to it
 tools\bridge.ps1 start
 tools\bridge.ps1 firewall                 # elevated shell, opens the port to LocalSubnet
 ```

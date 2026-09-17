@@ -61,6 +61,13 @@ product.
   `Sec-WebSocket-Protocol: bridge` in the response; verified against real
   uvicorn, not just TestClient.
 
+- [x] **B3c generate the token; refuse an open bind without one** (S)
+  `agent-bridge init` writes `config.json` with a 32-byte hex token and
+  prints the peer-side commands; `agent-bridge token [--rotate]` shows or
+  replaces it. `serve` refuses a non-loopback bind with an empty or
+  placeholder token. Pulled forward from S4 and P1 because "how would someone
+  set the token?" had no good answer.
+
 - [ ] **B4 live WebSocket frames are never marked read** (S)
   The backlog loop marks read after send; the steady-state loop does not, so
   every live message replays as `[unread backlog]` on reconnect. Mark read
@@ -121,10 +128,9 @@ product.
   *AC:* a `mail`-only peer calling `bridge_read` gets a scoped refusal;
   `bridge_capabilities` lists only the tools the caller may use.
 
-- [ ] **S4 refuse to bind off-loopback without a credential** (S)
-  Startup error, not a warning, when `host != 127.0.0.1` and no token and no
-  peers. `config.example.json` keeps `CHANGE_ME`, and startup refuses that
-  literal too.
+- [x] **S4 refuse to bind off-loopback without a credential** (S)
+  Done in B3c. Revisit when S1 adds per-peer credentials: "no token and no
+  peers" becomes the condition.
 
 - [ ] **S5 audit log** (S)
   One line per tool call and REST call: timestamp, peer, tool, key args
@@ -182,10 +188,10 @@ product.
 
 ## Sprint 3 — install, run, operate
 
-- [ ] **P1 entry point + `uvx`** (S)
-  `[project.scripts] agent-bridge = "agent_bridge.server:main"`;
-  `agent-bridge init` writes a config with a generated token;
-  `agent-bridge serve|status|stop`.
+- [~] **P1 entry point + `uvx`** (S)
+  `agent-bridge serve|init|token` exist (B3c). Remaining: `status|stop`
+  so `bridge.ps1` is not the only way to manage the process, and a
+  `uvx agent-bridge` install path once it is published.
 
 - [ ] **P2 cross-platform daemon** (M)
   Keep `bridge.ps1` for Windows; add a systemd unit and a launchd plist
