@@ -85,6 +85,16 @@ class Files:
         self.ripgrep = ripgrep
         self.grep_timeout_s = grep_timeout_s
 
+    def engine(self) -> str:
+        """Which grep will run, in words, for the startup log and whoami."""
+        rg = shutil.which(self.ripgrep or "rg")
+        if rg:
+            return f"ripgrep ({rg})"
+        if self.ripgrep:
+            return (f"python scan - ripgrep_path {self.ripgrep!r} is not an executable "
+                    "(fix it in config.json)")
+        return "python scan (rg not on PATH; set ripgrep_path in config.json)"
+
     def resolve(self, path: str) -> Path:
         if not path or not path.strip():
             raise PathDenied("empty path")
@@ -247,18 +257,35 @@ class Files:
 
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.grep_timeout_s)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return {"error": f"grep timed out after {self.grep_timeout_s:g}s", "matches": [],
-                    "truncated": True, "reason": "timeout", "engine": "ripgrep"}
 
-        out = [ln for ln in stdout.decode("utf-8", errors="replace").splitlines() if ln.strip()]
-        truncated = len(out) > limit
-        return {"matches": out[:limit], "count": min(len(out), limit),
-                "truncated": truncated, "pattern": pattern, "engine": "ripgrep"}
+        # Lines are collected as they arrive rather than through communicate(),
+        # so a timeout returns what rg had already found instead of nothing.
+        out: list[str] = []
+
+        async def collect():
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line.strip() and len(out) <= limit:
+                    out.append(line)
+
+        reader = asyncio.ensure_future(collect())
+        timed_out = False
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=self.grep_timeout_s)
+        except asyncio.TimeoutError:
+            timed_out = True
+            proc.kill()
+            await proc.wait()
+        await reader
+
+        truncated = len(out) > limit or timed_out
+        res = {"matches": out[:limit], "count": min(len(out), limit),
+               "truncated": truncated, "pattern": pattern, "engine": "ripgrep"}
+        if timed_out:
+            res["reason"] = "timeout"
+            res["note"] = (f"ripgrep stopped after {self.grep_timeout_s:g}s; these are the "
+                           "matches it had found. Narrow the root or glob.")
+        return res
 
     def _grep_python(self, pattern: str, bases: list[Path], glob: str, limit: int,
                      context: int, ignore_case: bool) -> dict:

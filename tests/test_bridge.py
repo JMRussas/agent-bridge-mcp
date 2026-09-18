@@ -178,6 +178,40 @@ def test_the_budget_also_covers_many_files(tree, monkeypatch):
     assert 0 < res["files_scanned"] < 50
 
 
+@pytest.mark.parametrize("pattern", [
+    "(a{60000}){60000}",                  # the review's runaway: 700 MB and climbing
+    "(a{1000}){1000}",                    # 235 MB, 3 s
+    "(" * 1000 + "a" + ")" * 1000,        # RecursionError inside the compiler
+    "a" * 600,                            # simply too long
+])
+def test_patterns_that_are_expensive_to_compile_are_refused_fast(pattern):
+    # Regression (review): moving from re to regex moved the DoS from search to
+    # compile, and Deadline only started after compile returned.
+    import time
+    from agent_bridge.patterns import compile_pattern
+    t = time.perf_counter()
+    with pytest.raises(ValueError):
+        compile_pattern(pattern)
+    assert time.perf_counter() - t < 0.5
+
+
+@pytest.mark.parametrize("pattern", [
+    "(a{100}){100}", "[a-z]{1000}", "(a|b){500}c{500}", r"\{1000\}", "[{]{5}",
+    r"AvatarSize\s*=\s*(\d+)", "^(([a-z])+.)+[A-Z]([a-z])+$", "a{5,}b*c+",
+])
+def test_reasonable_patterns_still_compile(pattern):
+    from agent_bridge.patterns import compile_pattern
+    compile_pattern(pattern)
+
+
+def test_unroll_estimate_follows_nesting_not_siblings():
+    from agent_bridge.patterns import unroll_estimate
+    assert unroll_estimate("(a{100}){100}") == 10_000
+    assert unroll_estimate("a{500}b{500}") == 1_000            # siblings add
+    assert unroll_estimate(r"\{1000\}") == 6                    # escaped braces are literals
+    assert unroll_estimate("[{]{5}") == 5
+
+
 def test_a_bad_pattern_is_an_error_not_a_crash(tree):
     root, _ = tree
     res = Files({"proj": root})._grep_python("(unclosed", [root], "", 50, 0, False)
@@ -723,6 +757,25 @@ async def test_a_slow_grep_does_not_stall_the_mailbox(tree, monkeypatch):
     assert msg.text == "hello"
     assert not grep_task.done()
     assert (await grep_task)["engine"] == "python"
+
+
+def test_engine_report_names_a_bad_ripgrep_path(tree):
+    root, _ = tree
+    assert "not an executable" in Files({"proj": root}, ripgrep=str(root)).engine()
+    assert "python scan" in Files({"proj": root}, ripgrep="C:/nope/rg.exe").engine()
+
+
+@pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep not on PATH")
+async def test_ripgrep_timeout_keeps_partial_matches(tree, monkeypatch):
+    # rg finds matches quickly; a tiny budget must still return what arrived.
+    root, _ = tree
+    for i in range(300):
+        (root / "src" / f"m{i}.txt").write_text("AvatarSize\n" * 200)
+    f = Files({"proj": root}, grep_timeout_s=0.001)
+    res = await f.grep("AvatarSize", limit=50)
+    assert res["engine"] == "ripgrep"
+    if res.get("reason") == "timeout":
+        assert res["truncated"] is True and "matches it had found" in res["note"]
 
 
 @pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep not on PATH")
