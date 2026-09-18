@@ -155,6 +155,16 @@ def test_peer_add_refuses_a_reserved_name_before_writing(tmp_path: Path):
     assert cfg.read_text() == before
 
 
+def test_peer_commands_tolerate_a_null_peers_key(tmp_path: Path, capsys):
+    cfg = tmp_path / "config.json"
+    main(["init", "--config", str(cfg)])
+    data = json.loads(cfg.read_text()); data["peers"] = None
+    cfg.write_text(json.dumps(data))
+    assert main(["peer", "list", "--config", str(cfg)]) == 0
+    assert main(["peer", "add", "a", "--config", str(cfg)]) == 0
+    assert list(json.loads(cfg.read_text())["peers"]) == ["a"]
+
+
 def test_peer_show_list_remove(tmp_path: Path, capsys):
     cfg = tmp_path / "config.json"
     main(["init", "--config", str(cfg)])

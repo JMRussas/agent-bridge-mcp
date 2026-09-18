@@ -703,9 +703,10 @@ def serve(config: str | None = None, host: str | None = None, port: int | None =
     host = host or cfg.host
     port = port or int(cfg.port)
     refuse_open_bind(host, cfg.token, cfg.peers)
-    if not cfg.token and not cfg.peers:
-        log.warning("no token set - anything on this machine can use this bridge")
-    elif cfg.token in PLACEHOLDER_TOKENS:
+    creds = Credentials(cfg.self_name, cfg.token, cfg.peers)
+    if creds.open:
+        log.warning("no credential set - anything on this machine can use this bridge as admin")
+    elif not creds.admin_token:
         log.warning("the admin token is a placeholder and is NOT accepted; only peers can connect")
     for name in cfg.peers:
         log.info("  peer %-14s (own credential)", name)

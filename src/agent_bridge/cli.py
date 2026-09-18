@@ -105,7 +105,7 @@ def cmd_peer(args) -> int:
     if loaded is None:
         return 1
     path, data = loaded
-    peers = data.setdefault("peers", {})
+    peers = data["peers"] = data.get("peers") or {}      # tolerates "peers": null, as Config does
     name = (args.name or "").strip().lower()
 
     if args.action == "list":

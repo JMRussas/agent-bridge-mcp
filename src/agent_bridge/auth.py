@@ -40,7 +40,10 @@ class Forbidden(Exception):
 
 class Credentials:
     def __init__(self, self_name: str, admin_token: str, peers: dict[str, dict] | None = None):
-        self.self_name = self_name
+        # Normalised like every other mailbox name. The admin's default mailbox
+        # is this name, and mailbox.py compares names exactly - a "Fenrir"
+        # listener would never match m.to == "fenrir" and never consume a frame.
+        self.self_name = self_name.strip().lower()
         self.admin_token = "" if admin_token in PLACEHOLDER_TOKENS else admin_token
         self.peer_tokens: dict[str, str] = {
             name: spec["token"] for name, spec in (peers or {}).items()

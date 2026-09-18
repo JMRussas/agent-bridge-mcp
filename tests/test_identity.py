@@ -120,6 +120,12 @@ def test_a_placeholder_admin_token_is_not_a_credential():
     assert not c.open
 
 
+def test_the_admin_name_is_normalised():
+    c = Credentials(" Fenrir ", ADMIN, {})
+    assert c.identify(ADMIN).name == "fenrir"
+    assert c.mailbox_for(c.identify(ADMIN), "") == "fenrir"
+
+
 def test_no_credentials_at_all_means_everyone_is_the_admin():
     c = Credentials("here", "", {})
     assert c.open

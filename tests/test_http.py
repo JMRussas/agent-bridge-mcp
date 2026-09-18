@@ -199,6 +199,20 @@ def test_a_peer_listens_as_itself_and_may_not_listen_as_another(peered):
         assert exc.value.status_code == 403
 
 
+def test_the_admins_default_mailbox_is_normalised(tmp_path: Path):
+    # Regression: Credentials kept self_name as written, so with "Fenrir" the
+    # admin's /notify subscribed as "Fenrir", m.to == agent never matched
+    # "fenrir", and every live frame came back as backlog on reconnect.
+    cfg = Config({"self_name": "Fenrir", "token": TOKEN, "mailbox_store": "",
+                  "allowed_hosts": ["testserver:*"]})
+    with TestClient(build(cfg)) as c:
+        with c.websocket_connect("/notify", headers=BEARER) as ws:
+            c.post("/api/send", json={"sender": "a", "to": "fenrir", "text": "live"}, headers=BEARER)
+            assert ws.receive_text().endswith("a -> fenrir: live")
+        assert c.get("/api/inbox?agent=fenrir&peek=1", headers=BEARER).json()["count"] == 0
+        assert c.get("/api/inbox", headers=BEARER).json()["agent"] == "fenrir"
+
+
 def test_a_placeholder_admin_token_does_not_authenticate_when_peers_exist(tmp_path: Path):
     cfg = Config({"self_name": "here", "token": "CHANGE_ME", "mailbox_store": "",
                   "peers": {"sisyphus": {"token": PEER}}, "allowed_hosts": ["testserver:*"]})
