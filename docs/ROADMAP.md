@@ -81,7 +81,7 @@ product.
   *AC:* a 10 MB fixture with `count=5` returns 5 lines and peak memory does
   not include the file (assert via line iteration, not `read_text`).
 
-- [ ] **B6 mailbox: no message size limit, full rewrite per op** (M)
+- [x] **B6 mailbox: no message size limit, full rewrite per op** (M)
   Add `max_message_bytes` (default 64 KiB) rejected at `post`. Retention by
   bytes as well as count. Persist on a short debounce rather than on every
   `inbox()` read. (SQLite is a Sprint 3 story; this is the stopgap.)

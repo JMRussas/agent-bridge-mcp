@@ -46,6 +46,13 @@ class Message:
         return d
 
 
+# surrogatepass, because a lone surrogate can arrive through /api/send and
+# json.dumps will happily store it. A strict encode here would then raise from
+# _evict on every later post, permanently, until the store was hand-edited.
+def _size(text: str) -> int:
+    return len(text.encode("utf-8", errors="surrogatepass"))
+
+
 class Mailbox:
     # Persisted to disk, because "durable" has to mean durable against the
     # process ending, not merely against a recipient being busy. Holding the
@@ -53,14 +60,27 @@ class Mailbox:
     # server is restarted every time a tool is added to it, and each restart
     # silently discarded an unread question and every answer nobody had polled
     # for yet. A mailbox that loses mail when its process exits is a buffer.
-    def __init__(self, capacity: int = 200, store: str | Path | None = None):
+    def __init__(self, capacity: int = 200, store: str | Path | None = None,
+                 max_message_bytes: int = 64 * 1024, max_bytes: int = 4 * 1024 * 1024,
+                 debounce_s: float = 0.25):
+        if max_message_bytes <= 0 or max_bytes < max_message_bytes:
+            raise ValueError(
+                f"mailbox_max_bytes ({max_bytes}) must be at least max_message_bytes "
+                f"({max_message_bytes}), or one post evicts every other message"
+            )
         self._capacity = capacity
+        self._max_message_bytes = max_message_bytes
+        self._max_bytes = max_bytes
         self._messages: list[Message] = []
         self._next_id = 1
         self._seen: dict[str, float] = {}
         # agent name -> queues. One agent may have several sessions listening.
         self._subs: dict[str, list[asyncio.Queue]] = {}
         self._store = Path(store) if store else None
+        # Read-state writes are coalesced (see _persist_soon); this is the
+        # pending timer, and the delay.
+        self._debounce_s = debounce_s
+        self._pending: asyncio.TimerHandle | None = None
         self._load()
 
     # --- persistence --------------------------------------------------------
@@ -82,6 +102,9 @@ class Mailbox:
         self._next_id = max((m.id for m in self._messages), default=0) + 1
 
     def _persist(self) -> None:
+        if self._pending is not None:
+            self._pending.cancel()
+            self._pending = None
         if not self._store:
             return
         payload = {"messages": [asdict(m) for m in self._messages], "seen": self._seen}
@@ -94,6 +117,34 @@ class Mailbox:
         except OSError:
             pass
 
+    # Two kinds of write. A post ADDS data and is written at once: losing one
+    # to a kill inside a debounce window is a dropped question, the exact
+    # failure this store exists to prevent. A read-state change only flips a
+    # flag, happens on every inbox() and every socket frame, and rewrote the
+    # whole file each time; losing one costs a single re-delivery. Those are
+    # coalesced onto a short timer. Outside an event loop (tests, tools) they
+    # write immediately, so the behaviour is only ever "at least as durable".
+    def _persist_soon(self) -> None:
+        if not self._store:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._persist()
+            return
+        if self._pending is None:
+            self._pending = loop.call_later(self._debounce_s, self._persist)
+
+    # Flush anything pending. Wired to the app's shutdown, and safe to call
+    # any time.
+    def close(self) -> None:
+        if self._pending is not None:
+            self._persist()
+
+    @property
+    def bytes_used(self) -> int:
+        return sum(_size(m.text) for m in self._messages)
+
     # --- writing ---
 
     def post(self, sender: str, to: str, text: str, thread: str = "", meta: dict | None = None) -> Message:
@@ -103,24 +154,39 @@ class Mailbox:
             raise ValueError("'to' is required - name the peer this is for")
         if not text.strip():
             raise ValueError("'text' is empty")
+        size = _size(text)
+        if size > self._max_message_bytes:
+            raise ValueError(
+                f"message is {size} bytes; the limit is {self._max_message_bytes}. "
+                "Put the bulk in a file under a root and send its path instead."
+            )
+        for label, value in (("sender", sender), ("to", to), ("thread", thread)):
+            if len(value) > 200:
+                raise ValueError(f"'{label}' is longer than 200 characters")
 
         msg = Message(id=self._next_id, ts=time.time(), sender=sender, to=to,
                       text=text, thread=thread, meta=meta or {})
         self._next_id += 1
         self._messages.append(msg)
         self._seen[sender] = msg.ts
-
-        # Oldest-first eviction, and only messages already read - an unread
-        # message aging out would be a silently dropped question.
-        while len(self._messages) > self._capacity:
-            victim = next((m for m in self._messages if m.read), None)
-            if victim is None:
-                victim = self._messages[0]
-            self._messages.remove(victim)
+        self._evict()
 
         self._persist()
         self._fanout(msg)
         return msg
+
+    # Oldest-first eviction by count AND by bytes, and only messages already
+    # read - an unread message aging out would be a silently dropped question.
+    # Only when every message is unread does the oldest go regardless, because
+    # the alternative is a store that grows without bound.
+    def _evict(self) -> None:
+        while len(self._messages) > self._capacity or self.bytes_used > self._max_bytes:
+            if len(self._messages) <= 1:
+                return
+            victim = next((m for m in self._messages if m.read), None)
+            if victim is None:
+                victim = self._messages[0]
+            self._messages.remove(victim)
 
     def _fanout(self, msg: Message) -> None:
         for q in self._subs.get(msg.to, []) + self._subs.get("*", []):
@@ -144,7 +210,7 @@ class Mailbox:
                 m.read = True
             # Read state has to survive too, or a restart re-delivers everything
             # the peer already answered.
-            self._persist()
+            self._persist_soon()
         return out
 
     def history(self, agent: str = "", limit: int = 50, thread: str = "") -> list[Message]:
@@ -212,7 +278,7 @@ class Mailbox:
         for m in msgs:
             m.read = True
         if msgs:
-            self._persist()
+            self._persist_soon()
 
     def unsubscribe(self, agent: str, q: asyncio.Queue) -> None:
         agent = (agent or "*").strip().lower()

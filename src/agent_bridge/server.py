@@ -21,6 +21,7 @@
 
 import asyncio
 import hmac
+from contextlib import asynccontextmanager
 import ipaddress
 import logging
 import socket
@@ -115,7 +116,10 @@ def build(cfg: Config):
             return None
         return Path(p) if Path(p).is_absolute() else Path(__file__).resolve().parents[2] / p
 
-    box = Mailbox(capacity=int(cfg.inbox_max), store=beside_config(cfg.mailbox_store))
+    box = Mailbox(capacity=int(cfg.inbox_max), store=beside_config(cfg.mailbox_store),
+                  max_message_bytes=int(cfg.max_message_bytes),
+                  max_bytes=int(cfg.mailbox_max_bytes),
+                  debounce_s=float(cfg.mailbox_debounce_s))
     files = Files(cfg.roots, int(cfg.max_read_bytes))
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     avatars = Avatars(cfg.gifterboard, cfg.roots, output_dir=beside_config(cfg.output_dir))
@@ -169,7 +173,9 @@ def build(cfg: Config):
 
         Delivered live to any listener and queued durably, so it is read even if
         the recipient was mid-turn. Name yourself in `sender` so a reply can be
-        addressed back. Use `thread` to keep one investigation together.
+        addressed back. Use `thread` to keep one investigation together. Text is
+        capped (64 KiB by default); for anything bigger, write a file under a
+        root and send its path.
         """
         try:
             msg = box.post(sender or "remote", to, text, thread)
@@ -535,6 +541,22 @@ def build(cfg: Config):
             box.unsubscribe(agent, q)
 
     app = mcp.streamable_http_app()
+
+    # Flush the mailbox's coalesced read-state write on a clean shutdown.
+    # Starlette 1.x has no on_shutdown; the SDK already set a lifespan for its
+    # session manager, so wrap that one rather than replace it.
+    inner_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(a):
+        async with inner_lifespan(a) as state:
+            try:
+                yield state
+            finally:
+                box.close()
+
+    app.router.lifespan_context = lifespan
+
     app.routes.append(WebSocketRoute("/notify", notify))
     app.routes.append(Route("/api/health", health, methods=["GET"]))
     app.routes.append(Route("/api/send", api_send, methods=["POST"]))

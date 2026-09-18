@@ -187,6 +187,90 @@ def test_unread_survives_capacity_pressure():
     assert kept[0].text == "the important question"
 
 
+def test_an_oversize_message_is_refused():
+    box = Mailbox(max_message_bytes=100)
+    with pytest.raises(ValueError, match="limit is 100"):
+        box.post("a", "b", "x" * 101)
+    box.post("a", "b", "\u4e2d" * 33)                    # 99 bytes: bytes, not chars
+    with pytest.raises(ValueError, match="limit is 100"):
+        box.post("a", "b", "\u4e2d" * 34)                # 102 bytes
+
+
+def test_retention_is_by_bytes_as_well_as_count():
+    box = Mailbox(capacity=1000, max_bytes=1000, max_message_bytes=500)
+    for i in range(3):
+        box.post("a", "b", f"{i}" + "x" * 299)          # 900 bytes, under the cap
+    box.inbox("b")                                       # 0, 1, 2 read
+    box.post("a", "b", "3" + "x" * 299)                  # 1200: evict oldest READ (0)
+    box.post("a", "b", "4" + "x" * 299)                  # 1200: evict oldest READ (1)
+    assert box.bytes_used == 900
+    assert [m.text[0] for m in box.history()] == ["2", "3", "4"]
+    assert box.unread_count("b") == 2                    # 3 and 4 untouched
+
+
+def test_a_byte_cap_below_one_message_is_refused():
+    with pytest.raises(ValueError, match="at least max_message_bytes"):
+        Mailbox(max_bytes=100, max_message_bytes=500)
+
+
+def test_a_stored_surrogate_does_not_poison_later_posts(tmp_path):
+    # Regression (review): a lone surrogate arrives via /api/send and json
+    # stores it; a strict encode in _evict then raised on every later post.
+    box = Mailbox(store=tmp_path / "m.json")
+    box.post("a", "b", "bad \udc80 char")
+    again = Mailbox(store=tmp_path / "m.json")
+    again.post("a", "b", "still works")
+    assert again.unread_count("b") == 2
+
+
+def test_the_last_unread_message_is_never_evicted():
+    box = Mailbox(capacity=1000, max_bytes=500, max_message_bytes=500)
+    box.post("a", "b", "1" + "z" * 399)
+    box.post("a", "b", "2" + "z" * 399)                  # 800 > 500, both unread
+    # With nothing read, the oldest goes - but never the one just posted.
+    assert [m.text[0] for m in box.history()] == ["2"]
+    assert box.unread_count("b") == 1
+
+
+async def test_read_state_writes_are_coalesced_but_posts_are_not(tmp_path, monkeypatch):
+    # AC (B6): ten inbox reads in a row write the store at most once; a post
+    # writes immediately because losing it would be a dropped question.
+    box = Mailbox(store=tmp_path / "m.json", debounce_s=0.05)
+    writes = []
+    real = box._persist
+    monkeypatch.setattr(box, "_persist", lambda: writes.append(1) or real())
+
+    for i in range(10):
+        box.post("a", "b", f"m{i}")
+    assert len(writes) == 10                             # one per post, at once
+
+    writes.clear()
+    for _ in range(10):
+        box.inbox("b", limit=1)
+    assert writes == []                                  # nothing yet ...
+    await asyncio.sleep(0.15)
+    assert len(writes) == 1                              # ... then exactly one
+    assert Mailbox(store=tmp_path / "m.json").unread_count("b") == 0
+
+
+async def test_close_flushes_a_pending_write(tmp_path):
+    store = tmp_path / "m.json"
+    box = Mailbox(store=store, debounce_s=10)
+    box.post("a", "b", "hello")
+    box.inbox("b")
+    assert Mailbox(store=store).unread_count("b") == 1   # not yet on disk
+    box.close()
+    assert Mailbox(store=store).unread_count("b") == 0
+
+
+def test_without_a_loop_read_state_is_written_immediately(tmp_path):
+    store = tmp_path / "m.json"
+    box = Mailbox(store=store)
+    box.post("a", "b", "hello")
+    box.inbox("b")
+    assert Mailbox(store=store).unread_count("b") == 0
+
+
 def test_post_requires_a_recipient_and_a_body():
     box = Mailbox()
     with pytest.raises(ValueError):
@@ -195,19 +279,16 @@ def test_post_requires_a_recipient_and_a_body():
         box.post("a", "b", "   ")
 
 
-def test_subscriber_receives_live_fanout():
-    async def go():
-        box = Mailbox()
-        q = box.subscribe("fenrir")
-        box.post("sisyphus", "fenrir", "live one")
-        msg = await asyncio.wait_for(q.get(), timeout=1)
-        assert msg.text == "live one"
-        # A message for someone else must not reach this subscriber.
-        box.post("sisyphus", "other", "not yours")
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(q.get(), timeout=0.1)
-
-    asyncio.run(go())
+async def test_subscriber_receives_live_fanout():
+    box = Mailbox()
+    q = box.subscribe("fenrir")
+    box.post("sisyphus", "fenrir", "live one")
+    msg = await asyncio.wait_for(q.get(), timeout=1)
+    assert msg.text == "live one"
+    # A message for someone else must not reach this subscriber.
+    box.post("sisyphus", "other", "not yours")
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(q.get(), timeout=0.1)
 
 
 # --- execution allowlist ---------------------------------------------------
@@ -220,30 +301,30 @@ def runner(tmp_path, enabled=True):
     return Runner(CMDS, {"proj": tmp_path}, enabled)
 
 
-def test_unknown_command_is_refused(tmp_path):
+async def test_unknown_command_is_refused(tmp_path):
     with pytest.raises(ExecDenied, match="allowlist"):
-        asyncio.run(runner(tmp_path).run("rm-rf"))
+        await runner(tmp_path).run("rm-rf")
 
 
-def test_execution_can_be_disabled(tmp_path):
+async def test_execution_can_be_disabled(tmp_path):
     with pytest.raises(ExecDenied, match="disabled"):
-        asyncio.run(runner(tmp_path, enabled=False).run("git-status", root="proj"))
+        await runner(tmp_path, enabled=False).run("git-status", root="proj")
 
 
-def test_extra_args_are_capped(tmp_path):
+async def test_extra_args_are_capped(tmp_path):
     with pytest.raises(ExecDenied, match="at most"):
-        asyncio.run(runner(tmp_path).run("autoplay", ["1", "2", "3"], root="proj"))
+        await runner(tmp_path).run("autoplay", ["1", "2", "3"], root="proj")
 
 
 @pytest.mark.parametrize("bad", ["a; rm -rf /", "$(whoami)", "--out=/etc/x", "a b", "`id`", "a|b"])
-def test_shell_metacharacters_in_args_are_refused(tmp_path, bad):
+async def test_shell_metacharacters_in_args_are_refused(tmp_path, bad):
     with pytest.raises(ExecDenied, match="rejected"):
-        asyncio.run(runner(tmp_path).run("autoplay", [bad], root="proj"))
+        await runner(tmp_path).run("autoplay", [bad], root="proj")
 
 
-def test_command_pinned_to_a_root_refuses_another(tmp_path):
+async def test_command_pinned_to_a_root_refuses_another(tmp_path):
     with pytest.raises(ExecDenied, match="only runs in root"):
-        asyncio.run(runner(tmp_path).run("autoplay", root="somewhere"))
+        await runner(tmp_path).run("autoplay", root="somewhere")
 
 
 # --- png encoder -----------------------------------------------------------
@@ -432,44 +513,31 @@ def test_memory_only_is_still_supported(tmp_path):
 # addresses, making /notify unusable across a LAN. bridge_wait gives the same
 # latency over an ordinary request.
 
-def test_wait_returns_immediately_when_mail_is_already_waiting():
-    async def go():
-        box = Mailbox()
-        box.post("a", "fenrir", "already here")
-        q = box.subscribe("fenrir")
-        try:
-            # The short-circuit path: unread mail must not block.
-            existing = box.inbox("fenrir", peek=True)
-            assert len(existing) == 1
-        finally:
-            box.unsubscribe("fenrir", q)
-    asyncio.run(go())
+async def test_wait_returns_immediately_when_mail_is_already_waiting():
+    box = Mailbox()
+    box.post("a", "fenrir", "already here")
+    # The short-circuit path: unread mail must not block.
+    msgs, timed_out = await box.wait("fenrir", 5.0)
+    assert not timed_out and len(msgs) == 1
 
 
-def test_wait_wakes_on_a_message_rather_than_timing_out():
-    async def go():
-        box = Mailbox()
-        q = box.subscribe("fenrir")
-        async def send_soon():
-            await asyncio.sleep(0.05)
-            box.post("sisyphus", "fenrir", "arrived while waiting")
-        asyncio.get_running_loop().create_task(send_soon())
-        msg = await asyncio.wait_for(q.get(), timeout=2.0)
-        assert msg.text == "arrived while waiting"
-        box.unsubscribe("fenrir", q)
-    asyncio.run(go())
+async def test_wait_wakes_on_a_message_rather_than_timing_out():
+    box = Mailbox()
+
+    async def send_soon():
+        await asyncio.sleep(0.05)
+        box.post("sisyphus", "fenrir", "arrived while waiting")
+    asyncio.get_running_loop().create_task(send_soon())
+    msgs, timed_out = await box.wait("fenrir", 2.0)
+    assert not timed_out and msgs[0].text == "arrived while waiting"
 
 
-def test_wait_times_out_cleanly_with_no_mail():
-    async def go():
-        box = Mailbox()
-        q = box.subscribe("fenrir")
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(q.get(), timeout=0.1)
-        box.unsubscribe("fenrir", q)
-        # Unsubscribing must not leave the queue registered.
-        assert q not in box._subs.get("fenrir", [])
-    asyncio.run(go())
+async def test_wait_times_out_cleanly_with_no_mail():
+    box = Mailbox()
+    msgs, timed_out = await box.wait("fenrir", 0.1)
+    assert timed_out and msgs == []
+    # Unsubscribing must not leave the queue registered.
+    assert box._subs.get("fenrir", []) == []
 
 
 async def test_wait_returns_the_message_even_if_a_socket_consumed_it_first():
