@@ -175,7 +175,8 @@ product.
   Lower-case keys once in `Config`; reject unknown top-level keys with a
   message naming the nearest valid one; the DENY_PARTS check in
   `Files.resolve` must inspect parents *below* the root only (a root that
-  lives under a folder named `bin` is currently unreadable).
+  lives under a folder named `bin` is currently unreadable). Refuse
+  one-letter root names: `t:big.log` parses as a Windows drive letter.
 
 - [ ] **G4 pure-ASGI auth middleware** (S)
   `BaseHTTPMiddleware` has known trouble with streaming responses and

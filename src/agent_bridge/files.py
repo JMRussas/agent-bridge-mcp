@@ -41,6 +41,38 @@ class PathDenied(Exception):
     pass
 
 
+def _skip_rest_of_line(f) -> None:
+    while True:
+        piece = f.readline(1 << 16)
+        if not piece or piece.endswith(b"\n"):
+            return
+
+
+# Lines left in the file from the current position, at bytes.count speed. A
+# trailing partial line (no final newline) is a line too, as splitlines has it.
+def _count_remaining_lines(f) -> int:
+    n = 0
+    last = b""
+    while True:
+        buf = f.read(1 << 20)
+        if not buf:
+            break
+        n += buf.count(b"\n")
+        last = buf[-1:]
+    return n + (1 if last and last != b"\n" else 0)
+
+
+# The first `limit` bytes of a line, backed off to a character boundary so the
+# cut does not end in a replacement glyph.
+def _utf8_head(line: bytes, limit: int) -> str:
+    head = line[:limit]
+    while head and (head[-1] & 0xC0) == 0x80:
+        head = head[:-1]
+    if head and head[-1] >= 0xC0:           # a lead byte with no continuation
+        head = head[:-1]
+    return head.decode("utf-8", errors="replace")
+
+
 class Files:
     def __init__(self, roots: dict[str, Path], max_read_bytes: int = 256 * 1024):
         self.roots = roots
@@ -105,49 +137,76 @@ class Files:
     # Streams the file rather than loading it. The size cap used to apply only
     # when the whole file was asked for; any count>0 read the entire file into
     # memory and then sliced it, so a 2 GB file with count=1 was a 2 GB read.
-    # Now only the requested lines are ever held, and the cap applies to what
-    # is returned, however the request was phrased.
+    #
+    # Binary, for three reasons found in review: the cap is then bytes rather
+    # than code points (a CJK line is three bytes per character); a line longer
+    # than the cap is read in bounded pieces instead of being buffered whole by
+    # the text layer; and once the slice is complete the rest of the file is
+    # counted with bytes.count, not decoded line by line.
     def read(self, path: str, start: int = 1, count: int = 0) -> dict:
         target = self.resolve(path)
         if not target.is_file():
             raise PathDenied(f"not a file: {target}")
         size = target.stat().st_size
-        if size > self.max_read_bytes and count == 0:
+        cap = self.max_read_bytes
+        if size > cap and count == 0:
             raise PathDenied(
-                f"{target.name} is {size} bytes, over the {self.max_read_bytes} limit. "
+                f"{target.name} is {size} bytes, over the {cap} limit. "
                 "Pass start/count to read a slice."
             )
 
         start = max(1, int(start))
         stop = start + count if count else None          # exclusive, 1-based
         chunk: list[str] = []
-        chunk_bytes = 0
+        used = 0
         truncated = False
-        total = 0
-        with target.open(encoding="utf-8", errors="replace", newline="") as f:
-            for total, raw in enumerate(f, start=1):
-                if total < start or (stop is not None and total >= stop):
+        note = ""
+        n = 0
+        with target.open("rb") as f:
+            while True:
+                raw = f.readline(cap + 1)
+                if not raw:
+                    break
+                n += 1
+                # More than cap bytes and no newline: the line goes on. Skip the
+                # rest of it without ever holding more than a buffer of it.
+                cut = len(raw) > cap and not raw.endswith(b"\n")
+                if cut:
+                    _skip_rest_of_line(f)
+                if n < start:
                     continue
-                if truncated:
-                    continue                             # still counting lines
-                line = raw.rstrip("\r\n")
-                chunk_bytes += len(line) + 1
-                if chunk_bytes > self.max_read_bytes:
+                if stop is not None and n >= stop:
+                    n += _count_remaining_lines(f)
+                    break
+
+                line = raw.rstrip(b"\r\n")
+                cost = len(line) + 1
+                if cut or used + cost > cap:
                     truncated = True
-                    continue
-                chunk.append(line)
+                    if chunk:
+                        note = (f"stopped at {cap} bytes; the next line is {n}. "
+                                "Ask for a smaller count.")
+                    else:
+                        # One line alone exceeds the cap. Return its head rather
+                        # than nothing, or the caller can never read it at all.
+                        chunk.append(_utf8_head(line, cap))
+                        note = (f"line {n} is longer than the {cap}-byte limit; "
+                                f"only its first {cap} bytes are shown.")
+                    n += _count_remaining_lines(f)
+                    break
+                chunk.append(line.decode("utf-8", errors="replace"))
+                used += cost
 
         out = {
             "path": str(target),
-            "total_lines": total,
+            "total_lines": n,
             "start": start,
             "returned": len(chunk),
             "text": "\n".join(f"{start + i}\t{ln}" for i, ln in enumerate(chunk)),
         }
         if truncated:
             out["truncated"] = True
-            out["note"] = (f"stopped at {self.max_read_bytes} bytes; the next line is "
-                           f"{start + len(chunk)}. Ask for a smaller count.")
+            out["note"] = note
         return out
 
     # Async, because the MCP SDK calls a plain function inline on the event

@@ -103,6 +103,36 @@ def test_a_slice_is_capped_by_bytes_not_only_by_count(tree):
     assert out["total_lines"] == 50                       # still counted to the end
 
 
+def test_a_line_longer_than_the_cap_is_still_readable(tree):
+    # Regression (review): a single over-cap line was dropped whole, with a note
+    # pointing the caller back at the same line - an infinite loop.
+    root, _ = tree
+    (root / "src" / "long.txt").write_text("short\n" + "z" * 5000 + "\nafter\n")
+    f = Files({"proj": root}, max_read_bytes=2000)
+    out = f.read("proj:src/long.txt", start=2, count=1)
+    assert out["returned"] == 1
+    assert out["truncated"] is True and "longer than the 2000-byte limit" in out["note"]
+    assert out["text"] == "2\t" + "z" * 2000
+    assert out["total_lines"] == 3
+
+
+def test_the_cap_counts_bytes_not_characters(tree):
+    # Regression (review): len(str) passed a 1500-char CJK line through a
+    # 2000-byte cap and returned 4500 bytes.
+    root, _ = tree
+    cjk = "\u4e2d" * 1000                                 # 3000 bytes per line
+    (root / "src" / "cjk.txt").write_text("\n".join([cjk] * 3), encoding="utf-8")
+    f = Files({"proj": root}, max_read_bytes=7000)
+    out = f.read("proj:src/cjk.txt", start=1, count=3)
+    assert out["returned"] == 2 and out["truncated"] is True
+    assert "next line is 3" in out["note"]
+
+    # And a cut never lands mid-character.
+    out = Files({"proj": root}, max_read_bytes=1000).read("proj:src/cjk.txt", start=1, count=1)
+    body = out["text"].split("\t", 1)[1]
+    assert "\ufffd" not in body and len(body.encode()) <= 1000 and body == "\u4e2d" * 333
+
+
 def test_crlf_files_read_the_same_as_lf(tree):
     root, _ = tree
     (root / "src" / "win.txt").write_bytes(b"one\r\ntwo\r\nthree")
