@@ -141,6 +141,72 @@ def test_a_token_the_subprotocol_grammar_cannot_carry_is_refused_at_load():
     Config({"token": "0123abcd-._~"})          # hex, base64url and unreserved: fine
 
 
+# --- per-peer credentials (S1) --------------------------------------------------
+#
+# The token is the identity. A peer's token names the peer: it sends as itself
+# whatever the body says, and it reads, waits on and listens to its own mailbox
+# only. The admin token keeps the old, unrestricted semantics.
+
+PEER = "peer-token-not-secret"
+AS_PEER = {"Authorization": f"Bearer {PEER}"}
+
+
+@pytest.fixture
+def peered(tmp_path: Path):
+    cfg = Config({
+        "self_name": "here", "token": TOKEN, "roots": {}, "mailbox_store": "",
+        "peers": {"sisyphus": {"token": PEER}},
+        "allowed_hosts": ["testserver:*"],
+    })
+    with TestClient(build(cfg)) as c:
+        yield c
+
+
+def test_a_peer_sends_as_itself_whatever_the_body_says(peered):
+    r = peered.post("/api/send", json={"sender": "here", "to": "x", "text": "hi"}, headers=AS_PEER)
+    assert r.status_code == 200 and r.json()["sender"] == "sisyphus"
+    # The admin may still name a sender, and defaults to this machine's name.
+    r = peered.post("/api/send", json={"sender": "script", "to": "x", "text": "hi"}, headers=BEARER)
+    assert r.json()["sender"] == "script"
+    r = peered.post("/api/send", json={"to": "x", "text": "hi"}, headers=BEARER)
+    assert r.json()["sender"] == "here"
+
+
+def test_a_peer_reads_only_its_own_mailbox_over_rest(peered):
+    peered.post("/api/send", json={"to": "sisyphus", "text": "yours"}, headers=BEARER)
+    peered.post("/api/send", json={"to": "other", "text": "not yours"}, headers=BEARER)
+
+    r = peered.get("/api/inbox?agent=other", headers=AS_PEER)
+    assert r.status_code == 403 and "may not read the mailbox of 'other'" in r.json()["error"]
+    assert peered.get("/api/wait?agent=other&timeout=1", headers=AS_PEER).status_code == 403
+
+    # No agent means "me", for a peer.
+    r = peered.get("/api/inbox", headers=AS_PEER)
+    assert r.json()["agent"] == "sisyphus" and [m["text"] for m in r.json()["messages"]] == ["yours"]
+    # The admin may read anyone's, and "other" still has its message.
+    assert peered.get("/api/inbox?agent=other", headers=BEARER).json()["count"] == 1
+
+
+def test_a_peer_listens_as_itself_and_may_not_listen_as_another(peered):
+    with peered.websocket_connect("/notify", subprotocols=["bridge", f"bearer.{PEER}"]) as ws:
+        peered.post("/api/send", json={"to": "sisyphus", "text": "ping"}, headers=BEARER)
+        assert ws.receive_text().endswith("here -> sisyphus: ping")
+
+    for other in ("other", "*"):
+        with pytest.raises(WebSocketDenialResponse) as exc:
+            with peered.websocket_connect(f"/notify?agent={other}", headers=AS_PEER):
+                pass
+        assert exc.value.status_code == 403
+
+
+def test_a_placeholder_admin_token_does_not_authenticate_when_peers_exist(tmp_path: Path):
+    cfg = Config({"self_name": "here", "token": "CHANGE_ME", "mailbox_store": "",
+                  "peers": {"sisyphus": {"token": PEER}}, "allowed_hosts": ["testserver:*"]})
+    with TestClient(build(cfg)) as c:
+        assert c.get("/api/inbox", headers={"Authorization": "Bearer CHANGE_ME"}).status_code == 401
+        assert c.get("/api/inbox", headers=AS_PEER).status_code == 200
+
+
 def test_a_clean_shutdown_flushes_the_coalesced_read_state(tmp_path: Path):
     from agent_bridge.mailbox import Mailbox
     store = tmp_path / "mailbox.json"

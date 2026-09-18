@@ -103,7 +103,7 @@ product.
 
 ## Sprint 1 — identity and trust (the product-blocking security work)
 
-- [ ] **S1 per-peer credentials; sender derived from the credential** (M)
+- [x] **S1 per-peer credentials; sender derived from the credential** (M)
   Config grows `"peers": {"sisyphus": {"token": "...", "exec": false}}`. The
   single `token` stays as a legacy/admin credential. `bridge_send(sender=…)`
   and `POST /api/send` stop trusting the body: sender = the authenticated
@@ -129,8 +129,8 @@ product.
   `bridge_capabilities` lists only the tools the caller may use.
 
 - [x] **S4 refuse to bind off-loopback without a credential** (S)
-  Done in B3c. Revisit when S1 adds per-peer credentials: "no token and no
-  peers" becomes the condition.
+  Done in B3c; S1 made "no usable admin token and no peers" the condition,
+  and stopped a placeholder admin token from authenticating at all.
 
 - [ ] **S5 audit log** (S)
   One line per tool call and REST call: timestamp, peer, tool, key args
@@ -255,3 +255,15 @@ product.
   on every reconnect. Revisit only if a lost frame is actually observed.
 - **2026-09-17** — JSON store stays through Sprint 1 (B6 stopgap); SQLite is
   P3, not earlier, because identity work (S1) changes the schema.
+- **2026-09-18** — Tools learn their caller by re-reading the bearer header
+  from the request the streamable-HTTP transport attaches to the tool context
+  (`request_context.request`), not from state stashed by the middleware. One
+  extra `compare_digest` per call versus threading state through two
+  frameworks. A peer's `sender` is silently replaced by its own name rather
+  than refused: a peer that calls itself "sisyphus-claude" should not be
+  blocked, and the response reports the sender that was used.
+- **2026-09-18** — The `mcp` SDK's streamable-HTTP server transport leaves
+  anyio memory streams unclosed per request; that one `ResourceWarning` is
+  filtered in `pyproject.toml` so real MCP sessions can be tested under
+  warnings-as-errors. Nothing in this package creates a memory stream, so the
+  filter cannot hide one of ours.

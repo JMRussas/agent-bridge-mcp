@@ -53,17 +53,21 @@ def lan_addresses() -> list[str]:
     return addrs
 
 
-def peer_instructions(cfg: Config, host: str | None = None) -> str:
+def peer_instructions(cfg: Config, host: str | None = None, *,
+                      token: str | None = None, name: str = "<your-name>") -> str:
+    """The commands a peer runs, with the credential filled in. With `token`
+    and `name` these are for one named peer; without, for the admin token."""
     candidates = [host] if host else (lan_addresses() or ["<this-host>"])
     addr = candidates[0]
     base = f"http://{addr}:{cfg.port}"
-    t = cfg.token
+    t = token or cfg.token
     others = ""
     if len(candidates) > 1:
         others = (f"\n  (this machine also has {', '.join(candidates[1:])}; "
                   f"{addr} is the default-route address, which is usually the right one)")
+    whom = f"On '{name}'" if name != "<your-name>" else "On a peer"
     return "\n".join([
-        f"On a peer, register this bridge ('{cfg.self_name}') with Claude Code:{others}",
+        f"{whom}, register this bridge ('{cfg.self_name}') with Claude Code:{others}",
         "",
         f"  claude mcp add --transport http {cfg.self_name} {base}/mcp \\",
         f"    --header \"Authorization: Bearer {t}\"",
@@ -74,13 +78,71 @@ def peer_instructions(cfg: Config, host: str | None = None) -> str:
         "",
         "Listen for messages live in Claude Code:",
         "",
-        f"  Monitor(ws: {{url: \"ws://{addr}:{cfg.port}/notify?agent=<your-name>\",",
+        f"  Monitor(ws: {{url: \"ws://{addr}:{cfg.port}/notify?agent={name}\",",
         f"               protocols: [\"bridge\", \"bearer.{t}\"]}}, ...)",
         "",
         "Or from a shell already mid-session:",
         "",
-        f"  curl -H \"Authorization: Bearer {t}\" \"{base}/api/inbox?agent=<your-name>\"",
+        f"  curl -H \"Authorization: Bearer {t}\" \"{base}/api/inbox?agent={name}\"",
     ])
+
+
+def _load_data(args) -> tuple[Path, dict] | None:
+    path = Path(args.config) if args.config else default_config_path()
+    if not path.exists():
+        print(f"no config at {path}. Run 'agent-bridge init' first.", file=sys.stderr)
+        return None
+    return path, json.loads(path.read_text(encoding="utf-8"))
+
+
+def _save(path: Path, data: dict) -> None:
+    Config(data)                                        # refuse before writing, not after
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def cmd_peer(args) -> int:
+    loaded = _load_data(args)
+    if loaded is None:
+        return 1
+    path, data = loaded
+    peers = data.setdefault("peers", {})
+    name = (args.name or "").strip().lower()
+
+    if args.action == "list":
+        for n in sorted(peers):
+            print(n)
+        if not peers:
+            print("(no peers; every caller uses the admin token)", file=sys.stderr)
+        return 0
+    if not name:
+        print(f"'peer {args.action}' needs a name", file=sys.stderr)
+        return 1
+
+    if args.action == "remove":
+        if name not in peers:
+            print(f"no peer '{name}'", file=sys.stderr)
+            return 1
+        del peers[name]
+        _save(path, data)
+        print(f"removed '{name}'. Restart the bridge; its token no longer works.")
+        return 0
+
+    if args.action == "add":
+        if name in peers and not args.rotate:
+            print(f"peer '{name}' exists. Use --rotate to replace its token, "
+                  f"or 'peer show {name}' to print it.", file=sys.stderr)
+            return 1
+        peers[name] = {**peers.get(name, {}), "token": new_token()}
+        _save(path, data)
+        print(f"{'rotated' if args.rotate else 'added'} '{name}'. "
+              f"Restart the bridge, then on {name}:\n")
+    elif name not in peers:                             # show
+        print(f"no peer '{name}'", file=sys.stderr)
+        return 1
+
+    cfg = Config(data)
+    print(peer_instructions(cfg, token=cfg.peers[name]["token"], name=name))
+    return 0
 
 
 def cmd_init(args) -> int:
@@ -151,14 +213,21 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--force", action="store_true", help="overwrite an existing config")
     i.set_defaults(fn=cmd_init)
 
-    t = sub.add_parser("token", help="print the peer-side commands for the current token")
+    t = sub.add_parser("token", help="print the peer-side commands for the admin token")
     add_config(t)
     t.add_argument("--rotate", action="store_true", help="generate a new token first")
     t.set_defaults(fn=cmd_token)
 
+    pr = sub.add_parser("peer", help="manage per-peer credentials")
+    add_config(pr)
+    pr.add_argument("action", choices=["add", "show", "remove", "list"])
+    pr.add_argument("name", nargs="?", default="", help="the peer's name (its mailbox)")
+    pr.add_argument("--rotate", action="store_true", help="with add: replace an existing peer's token")
+    pr.set_defaults(fn=cmd_peer)
+
     argv = sys.argv[1:] if argv is None else argv
     # No subcommand (the old spelling, and what bridge.ps1 runs) means serve.
-    if not any(a in ("serve", "init", "token", "-h", "--help") for a in argv):
+    if not any(a in ("serve", "init", "token", "peer", "-h", "--help") for a in argv):
         argv = ["serve", *argv]
     args = ap.parse_args(argv)
     return args.fn(args)

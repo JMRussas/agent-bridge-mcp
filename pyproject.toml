@@ -34,9 +34,13 @@ where = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # Warnings are errors, so a leaked handle or a bad escape fails the build
-# instead of scrolling past. The one exception is inside the MCP SDK's own
-# settings model and is not ours to fix.
+# instead of scrolling past. The exceptions are inside the MCP SDK and are
+# not ours to fix: its settings model, and the anyio memory streams its
+# streamable-HTTP server transport opens per request and never closes (seen
+# by any test that completes a real MCP session; nothing in this package
+# creates a memory stream).
 filterwarnings = [
     "error",
     "ignore::pydantic_settings.exceptions.IncompleteFieldDefinitionWarning",
+    "ignore:Unclosed <MemoryObjectReceiveStream:ResourceWarning",
 ]

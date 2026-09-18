@@ -21,6 +21,7 @@ DEFAULTS = {
     "host": "0.0.0.0",
     "port": 8791,
     "token": "",
+    "peers": {},
     "roots": {},
     "allowed_hosts": [],
     "max_read_bytes": 256 * 1024,
@@ -52,6 +53,8 @@ class Config:
                 "carry. Use A-Z a-z 0-9 and any of - . _ ~ (a hex or base64url "
                 "string is fine)."
             )
+
+        self.peers = _peers(merged.get("peers") or {}, merged["self_name"], merged["token"])
 
         # Roots are resolved once, at load. Every later path check compares
         # against these resolved absolutes, so a symlink or a "..\" in a request
@@ -87,6 +90,37 @@ class Config:
                 "Run 'agent-bridge init' to write one with a generated token."
             )
         return cls(json.loads(p.read_text(encoding="utf-8")))
+
+
+# Each peer is {"token": "..."} and may carry more later (S3 adds scopes).
+# Names are normalised the way the mailbox normalises them, because the name
+# IS the mailbox once identity comes from the credential. Refused outright:
+# a blank or placeholder token, a token that is not a subprotocol string, a
+# peer named after this machine or "*", and any two credentials that match -
+# a shared token would make the first name in file order the winner, silently.
+def _peers(raw: dict, self_name: str, admin_token: str) -> dict[str, dict]:
+    from agent_bridge.auth import PLACEHOLDER_TOKENS, WILDCARD
+
+    if not isinstance(raw, dict):
+        raise SystemExit("peers must be a map of name -> {\"token\": ...}")
+    peers: dict[str, dict] = {}
+    seen = {admin_token} if admin_token not in PLACEHOLDER_TOKENS else set()
+    for name, spec in raw.items():
+        key = str(name).strip().lower()
+        if not key or key in (WILDCARD, str(self_name).strip().lower()):
+            raise SystemExit(f"peer name {name!r} is reserved (this machine is '{self_name}')")
+        token = (spec or {}).get("token") if isinstance(spec, dict) else None
+        if not isinstance(token, str) or token in PLACEHOLDER_TOKENS:
+            raise SystemExit(f"peer '{key}' needs a real token: run 'agent-bridge peer add {key}'")
+        if not TOKEN_CHARS.match(token):
+            raise SystemExit(f"peer '{key}' has a token the WebSocket subprotocol grammar cannot carry")
+        if token in seen:
+            raise SystemExit(f"peer '{key}' shares its token with another credential; each must be unique")
+        if key in peers:
+            raise SystemExit(f"peer '{key}' is listed twice")
+        seen.add(token)
+        peers[key] = {**spec, "token": token}
+    return peers
 
 
 def default_config_path() -> Path:
