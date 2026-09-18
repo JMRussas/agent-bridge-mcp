@@ -46,6 +46,13 @@ class Message:
         return d
 
 
+# surrogatepass, because a lone surrogate can arrive through /api/send and
+# json.dumps will happily store it. A strict encode here would then raise from
+# _evict on every later post, permanently, until the store was hand-edited.
+def _size(text: str) -> int:
+    return len(text.encode("utf-8", errors="surrogatepass"))
+
+
 class Mailbox:
     # Persisted to disk, because "durable" has to mean durable against the
     # process ending, not merely against a recipient being busy. Holding the
@@ -56,6 +63,11 @@ class Mailbox:
     def __init__(self, capacity: int = 200, store: str | Path | None = None,
                  max_message_bytes: int = 64 * 1024, max_bytes: int = 4 * 1024 * 1024,
                  debounce_s: float = 0.25):
+        if max_message_bytes <= 0 or max_bytes < max_message_bytes:
+            raise ValueError(
+                f"mailbox_max_bytes ({max_bytes}) must be at least max_message_bytes "
+                f"({max_message_bytes}), or one post evicts every other message"
+            )
         self._capacity = capacity
         self._max_message_bytes = max_message_bytes
         self._max_bytes = max_bytes
@@ -131,7 +143,7 @@ class Mailbox:
 
     @property
     def bytes_used(self) -> int:
-        return sum(len(m.text.encode("utf-8")) for m in self._messages)
+        return sum(_size(m.text) for m in self._messages)
 
     # --- writing ---
 
@@ -142,7 +154,7 @@ class Mailbox:
             raise ValueError("'to' is required - name the peer this is for")
         if not text.strip():
             raise ValueError("'text' is empty")
-        size = len(text.encode("utf-8"))
+        size = _size(text)
         if size > self._max_message_bytes:
             raise ValueError(
                 f"message is {size} bytes; the limit is {self._max_message_bytes}. "

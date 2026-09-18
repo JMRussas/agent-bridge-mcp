@@ -198,18 +198,37 @@ def test_an_oversize_message_is_refused():
 
 def test_retention_is_by_bytes_as_well_as_count():
     box = Mailbox(capacity=1000, max_bytes=1000, max_message_bytes=500)
-    for i in range(5):
-        box.post("a", "b", f"{i}" + "x" * 299)          # 300 bytes each
-    box.inbox("b")                                       # all read
-    box.post("a", "b", "final" + "y" * 295)
-    assert box.bytes_used <= 1000
-    texts = [m.text[:5] for m in box.history()]
-    assert texts[-1] == "final" and "0xxxx" not in texts   # oldest read went first
+    for i in range(3):
+        box.post("a", "b", f"{i}" + "x" * 299)          # 900 bytes, under the cap
+    box.inbox("b")                                       # 0, 1, 2 read
+    box.post("a", "b", "3" + "x" * 299)                  # 1200: evict oldest READ (0)
+    box.post("a", "b", "4" + "x" * 299)                  # 1200: evict oldest READ (1)
+    assert box.bytes_used == 900
+    assert [m.text[0] for m in box.history()] == ["2", "3", "4"]
+    assert box.unread_count("b") == 2                    # 3 and 4 untouched
+
+
+def test_a_byte_cap_below_one_message_is_refused():
+    with pytest.raises(ValueError, match="at least max_message_bytes"):
+        Mailbox(max_bytes=100, max_message_bytes=500)
+
+
+def test_a_stored_surrogate_does_not_poison_later_posts(tmp_path):
+    # Regression (review): a lone surrogate arrives via /api/send and json
+    # stores it; a strict encode in _evict then raised on every later post.
+    box = Mailbox(store=tmp_path / "m.json")
+    box.post("a", "b", "bad \udc80 char")
+    again = Mailbox(store=tmp_path / "m.json")
+    again.post("a", "b", "still works")
+    assert again.unread_count("b") == 2
 
 
 def test_the_last_unread_message_is_never_evicted():
-    box = Mailbox(capacity=1000, max_bytes=100, max_message_bytes=500)
-    box.post("a", "b", "z" * 200)                        # over the byte cap on its own
+    box = Mailbox(capacity=1000, max_bytes=500, max_message_bytes=500)
+    box.post("a", "b", "1" + "z" * 399)
+    box.post("a", "b", "2" + "z" * 399)                  # 800 > 500, both unread
+    # With nothing read, the oldest goes - but never the one just posted.
+    assert [m.text[0] for m in box.history()] == ["2"]
     assert box.unread_count("b") == 1
 
 

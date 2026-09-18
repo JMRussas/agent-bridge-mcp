@@ -28,6 +28,7 @@ DEFAULTS = {
     "mailbox_max_bytes": 4 * 1024 * 1024,
     "max_message_bytes": 64 * 1024,
     "mailbox_store": "mailbox.json",
+    "mailbox_debounce_s": 0.25,
     "output_dir": "out",
     "exec": {"enabled": False, "timeout": 300, "commands": {}},
     "gifterboard": {"url": "", "creator": "", "token": "", "avatar_size": 64},

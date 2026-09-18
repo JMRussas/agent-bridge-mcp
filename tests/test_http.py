@@ -145,7 +145,8 @@ def test_a_clean_shutdown_flushes_the_coalesced_read_state(tmp_path: Path):
     from agent_bridge.mailbox import Mailbox
     store = tmp_path / "mailbox.json"
     cfg = Config({"self_name": "here", "token": TOKEN, "roots": {},
-                  "mailbox_store": str(store), "allowed_hosts": ["testserver:*"]})
+                  "mailbox_store": str(store), "allowed_hosts": ["testserver:*"],
+                  "mailbox_debounce_s": 30})                 # so the timer cannot win the race
     with TestClient(build(cfg)) as c:
         c.post("/api/send", json={"sender": "a", "to": "x", "text": "hi"}, headers=BEARER)
         c.get("/api/inbox?agent=x", headers=BEARER)          # read: coalesced, not yet on disk
