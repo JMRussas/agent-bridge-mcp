@@ -46,15 +46,34 @@ FIXED_ENV = {
 }
 
 
-def child_env(spec_env: dict | None = None) -> dict[str, str]:
+def child_env(spec_env: dict[str, str] | None = None) -> dict[str, str]:
     """Build a child's environment: the passthrough set, the fixed opt-outs,
     then the command spec's own ``env`` map, which wins because the operator
-    wrote it."""
+    wrote it.
+
+    Windows environment names are case-insensitive, so a spec ``Path`` must
+    REPLACE the passthrough ``PATH`` rather than sit beside it - otherwise the
+    child sees one value and ``which()`` below resolves against the other.
+    """
     env = {k: os.environ[k] for k in PASSTHROUGH if k in os.environ}
     env.update(FIXED_ENV)
     for k, v in (spec_env or {}).items():
-        env[str(k)] = str(v)
+        if os.name == "nt":
+            env = {ek: ev for ek, ev in env.items() if ek.upper() != k.upper()}
+        env[k] = v
     return env
+
+
+def spec_env(name: str, spec: dict) -> dict[str, str]:
+    """The spec's ``env`` map, checked to be str -> str. config.json is not
+    validated at load, so a wrong shape would otherwise surface as an
+    AttributeError on the first run instead of a refusal naming the command."""
+    raw = spec.get("env") or {}
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in raw.items()
+    ):
+        raise ExecDenied(f"'{name}' has a malformed env in config.json: expected a map of string to string")
+    return raw
 
 
 class ExecDenied(Exception):
@@ -107,7 +126,7 @@ class Runner:
             )
 
         argv = list(spec["argv"]) + args
-        env = child_env(spec.get("env"))
+        env = child_env(spec_env(name, spec))
         # Resolve against the PATH the child will see, not the server's, so a
         # spec that overrides PATH runs the binary it named.
         exe = shutil.which(argv[0], path=env.get("PATH"))
