@@ -24,11 +24,12 @@
   "exec": {
     "enabled": true,
     "timeout": 300,
+    "//commands": "Each child gets a minimal environment (PATH, HOME, TEMP, the Windows system vars, DOTNET_* opt-outs) - never the server's own, which is where API keys live. A command that needs more sets it in its own \"env\" map.",
     "commands": {
       "viewers":     { "root": "rogue-lite",  "argv": ["dotnet", "run", "--project", "platform/cli", "--", "viewers"] },
       "autoplay":    { "root": "rogue-lite",  "argv": ["dotnet", "run", "--project", "platform/cli", "--", "autoplay"], "max_args": 2 },
       "build":       { "root": "rogue-lite",  "argv": ["dotnet", "build", "RogueLite.sln"] },
-      "git-status":  { "root": "*",           "argv": ["git", "status", "--short", "--branch"] },
+      "git-status":  { "root": "*",           "argv": ["git", "status", "--short", "--branch"], "env": { "GIT_TERMINAL_PROMPT": "0" } },
       "git-log":     { "root": "*",           "argv": ["git", "log", "--oneline", "-20"] },
       "git-diff":    { "root": "*",           "argv": ["git", "diff", "--stat"] },
       "node-check":  { "root": "sluzzygames", "argv": ["node", "--check", "game-feed.js"] },

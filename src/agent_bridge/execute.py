@@ -22,6 +22,40 @@ from pathlib import Path
 # flags or paths - anything richer is a sign the allowlist needs a new entry.
 SAFE_ARG = re.compile(r"^[A-Za-z0-9._=-]{1,64}$")
 
+# A child gets these from the server's environment and nothing else. The
+# server's own environment is whatever shell started it, and on a developer
+# box that is where the API keys live; a remote peer must not be able to read
+# them back with an allowlisted "printenv". What is listed is what a build
+# tool or git needs to locate itself, its config and its caches - remove one
+# and dotnet or git fails in a way that does not name the missing variable.
+PASSTHROUGH = (
+    "PATH", "PATHEXT", "SystemRoot", "SystemDrive", "windir", "ComSpec",
+    "TEMP", "TMP", "TMPDIR",
+    "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "ProgramFiles(x86)",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    "LANG", "LC_ALL", "USER", "USERNAME",
+)
+
+# Set unconditionally: a quieter, non-interactive child.
+FIXED_ENV = {
+    "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+    "DOTNET_NOLOGO": "1",
+    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
+    "NO_COLOR": "1",
+}
+
+
+def child_env(spec_env: dict | None = None) -> dict[str, str]:
+    """Build a child's environment: the passthrough set, the fixed opt-outs,
+    then the command spec's own ``env`` map, which wins because the operator
+    wrote it."""
+    env = {k: os.environ[k] for k in PASSTHROUGH if k in os.environ}
+    env.update(FIXED_ENV)
+    for k, v in (spec_env or {}).items():
+        env[str(k)] = str(v)
+    return env
+
 
 class ExecDenied(Exception):
     pass
@@ -73,7 +107,10 @@ class Runner:
             )
 
         argv = list(spec["argv"]) + args
-        exe = shutil.which(argv[0])
+        env = child_env(spec.get("env"))
+        # Resolve against the PATH the child will see, not the server's, so a
+        # spec that overrides PATH runs the binary it named.
+        exe = shutil.which(argv[0], path=env.get("PATH"))
         if exe is None:
             raise ExecDenied(f"'{argv[0]}' is not on this machine's PATH")
         argv[0] = exe
@@ -82,7 +119,7 @@ class Runner:
             *argv, cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "NO_COLOR": "1"},
+            env=env,
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)

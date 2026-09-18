@@ -150,6 +150,11 @@ not a wrapper around it:
    prefix also allows `git log; rm -rf`.
 3. **Nothing runs through a shell.** `argv` lists, `shell=False`. Extra
    arguments are additionally filtered to `[A-Za-z0-9._=-]`.
+   **Children do not inherit the server's environment.** The server was
+   started from a developer shell, which is where the API keys live; an
+   allowlisted `printenv` would have handed them to the peer. A child gets
+   `PASSTHROUGH` (what dotnet and git need to find themselves), the
+   `DOTNET_*`/`NO_COLOR` opt-outs, and the command spec's own `env` map.
 4. **The firewall rule is `LocalSubnet`, not `Any`**, and the bind is on a
    private-profile LAN interface.
 5. `.env`, `config.json` and credentials files are on a deny list, and
