@@ -120,7 +120,7 @@ def build(cfg: Config):
                   max_message_bytes=int(cfg.max_message_bytes),
                   max_bytes=int(cfg.mailbox_max_bytes),
                   debounce_s=float(cfg.mailbox_debounce_s))
-    files = Files(cfg.roots, int(cfg.max_read_bytes))
+    files = Files(cfg.roots, int(cfg.max_read_bytes), ripgrep=cfg.ripgrep_path)
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     avatars = Avatars(cfg.gifterboard, cfg.roots, output_dir=beside_config(cfg.output_dir))
     logs = Logs(cfg.roots)
@@ -164,6 +164,7 @@ def build(cfg: Config):
             "exec_enabled": cfg.exec_enabled,
             "commands": sorted(cfg.commands),
             "gifterboard_url": avatars.url or "(unset)",
+            "grep_engine": files.engine(),
             "peers": box.peers(),
         }
 
@@ -631,6 +632,7 @@ def serve(config: str | None = None, host: str | None = None, port: int | None =
     for name, path in cfg.roots.items():
         log.info("  root %-14s %s", name, path)
     log.info("  allowed Host headers: %s", ", ".join(allowed_hosts(cfg)))
+    log.info("  grep engine: %s", Files(cfg.roots, ripgrep=cfg.ripgrep_path).engine())
 
     uvicorn.run(build(cfg), host=host, port=port, log_level="warning")
     return 0

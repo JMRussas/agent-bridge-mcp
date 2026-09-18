@@ -88,7 +88,7 @@ product.
   *AC:* oversize post → `ValueError`; `inbox(peek=False)` ten times in a row
   writes the store at most once.
 
-- [ ] **B7 regex DoS in the Python grep fallback** (S)
+- [x] **B7 regex DoS in the Python grep fallback** (S)
   Time-box `_grep_python` (wall clock, e.g. 20 s) and return `truncated:
   true, reason: "timeout"`. Prefer ripgrep when found; add a `ripgrep_path`
   config key so a bundled binary can be pointed at.

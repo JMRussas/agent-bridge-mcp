@@ -22,9 +22,10 @@
 from __future__ import annotations
 
 import os
-import re
 import time
 from pathlib import Path
+
+from agent_bridge.patterns import Deadline, PatternTimeout, compile_pattern
 
 # Only these names are readable, anywhere under a configured root. An allowlist
 # of filenames keeps bin/ closed while letting the logs inside it through.
@@ -38,6 +39,7 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".vs", "obj",
 EXE_NAMES = ("RogueLite.exe", "roguelite.exe", "RogueLite.dll")
 
 MAX_TAIL = 2000
+FILTER_TIMEOUT_S = 10.0
 
 
 def _count_lines(path: Path) -> int:
@@ -168,10 +170,17 @@ class Logs:
             text = [ln for ln in text if f"[{want}]" in ln]
         if contains:
             try:
-                rx = re.compile(contains, re.IGNORECASE)
-            except re.error as e:
-                return {"error": f"bad regular expression: {e}"}
-            text = [ln for ln in text if rx.search(ln)]
+                rx = compile_pattern(contains, ignore_case=True)
+            except ValueError as e:
+                return {"error": str(e)}
+            # Caller-supplied regex over a log that can be hundreds of thousands
+            # of lines: bounded, for the same reason bridge_grep is.
+            deadline = Deadline(FILTER_TIMEOUT_S)
+            try:
+                text = [ln for ln in text if deadline.search(rx, ln)]
+            except PatternTimeout:
+                return {"error": f"'contains' filter timed out after {FILTER_TIMEOUT_S:g}s; "
+                                 "simplify the pattern or read fewer lines"}
 
         lines = max(1, min(int(lines), MAX_TAIL))
         tail = text[-lines:]

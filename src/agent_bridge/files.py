@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import shutil
 from fnmatch import fnmatch
 from pathlib import Path
 
 import anyio
+
+from agent_bridge.patterns import Deadline, PatternTimeout, compile_pattern
 
 # Anything here is either huge, binary, or someone's credentials. Skipped by
 # list and grep, and refused by read.
@@ -35,6 +36,7 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".pdf",
                    ".dll", ".exe", ".pdb", ".so", ".zip", ".7z", ".mp4", ".wav",
                    ".ogg", ".ttf", ".otf", ".rgba", ".pen", ".safetensors"}
 MAX_SCAN_BYTES = 2 * 1024 * 1024
+GREP_TIMEOUT_S = 20.0
 
 
 class PathDenied(Exception):
@@ -74,9 +76,24 @@ def _utf8_head(line: bytes, limit: int) -> str:
 
 
 class Files:
-    def __init__(self, roots: dict[str, Path], max_read_bytes: int = 256 * 1024):
+    def __init__(self, roots: dict[str, Path], max_read_bytes: int = 256 * 1024,
+                 ripgrep: str = "", grep_timeout_s: float = GREP_TIMEOUT_S):
         self.roots = roots
         self.max_read_bytes = max_read_bytes
+        # A path to rg, for the machine where it is not on PATH but is known to
+        # sit inside some editor bundle. Empty means look on PATH.
+        self.ripgrep = ripgrep
+        self.grep_timeout_s = grep_timeout_s
+
+    def engine(self) -> str:
+        """Which grep will run, in words, for the startup log and whoami."""
+        rg = shutil.which(self.ripgrep or "rg")
+        if rg:
+            return f"ripgrep ({rg})"
+        if self.ripgrep:
+            return (f"python scan - ripgrep_path {self.ripgrep!r} is not an executable "
+                    "(fix it in config.json)")
+        return "python scan (rg not on PATH; set ripgrep_path in config.json)"
 
     def resolve(self, path: str) -> Path:
         if not path or not path.strip():
@@ -217,7 +234,7 @@ class Files:
                    context: int = 0, ignore_case: bool = False) -> dict:
         bases = ([self.roots[root.lower()]] if root and root.lower() in self.roots
                  else list(self.roots.values()))
-        rg = shutil.which("rg")
+        rg = shutil.which(self.ripgrep or "rg")
         if not rg:
             # ripgrep is not on this machine's PATH - it ships inside editor
             # bundles, behind a versioned directory name that would rot. Scanning
@@ -240,57 +257,93 @@ class Files:
 
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return {"error": "grep timed out after 60s", "matches": []}
 
-        out = [ln for ln in stdout.decode("utf-8", errors="replace").splitlines() if ln.strip()]
-        truncated = len(out) > limit
-        return {"matches": out[:limit], "count": min(len(out), limit),
-                "truncated": truncated, "pattern": pattern, "engine": "ripgrep"}
+        # Lines are collected as they arrive rather than through communicate(),
+        # so a timeout returns what rg had already found instead of nothing.
+        out: list[str] = []
+
+        async def collect():
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line.strip() and len(out) <= limit:
+                    out.append(line)
+
+        reader = asyncio.ensure_future(collect())
+        timed_out = False
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=self.grep_timeout_s)
+        except asyncio.TimeoutError:
+            timed_out = True
+            proc.kill()
+            await proc.wait()
+        await reader
+
+        truncated = len(out) > limit or timed_out
+        res = {"matches": out[:limit], "count": min(len(out), limit),
+               "truncated": truncated, "pattern": pattern, "engine": "ripgrep"}
+        if timed_out:
+            res["reason"] = "timeout"
+            res["note"] = (f"ripgrep stopped after {self.grep_timeout_s:g}s; these are the "
+                           "matches it had found. Narrow the root or glob.")
+        return res
 
     def _grep_python(self, pattern: str, bases: list[Path], glob: str, limit: int,
                      context: int, ignore_case: bool) -> dict:
         try:
-            rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
-        except re.error as e:
-            return {"error": f"bad regular expression: {e}", "matches": []}
+            rx = compile_pattern(pattern, ignore_case)
+        except ValueError as e:
+            return {"error": str(e), "matches": []}
 
-        matches, truncated = [], False
-        for base in bases:
-            for path in self._walk(base):
-                if len(matches) >= limit:
-                    truncated = True
-                    break
-                rel = path.relative_to(base)
-                if glob and not fnmatch(rel.as_posix(), glob):
-                    continue
-                try:
-                    if path.stat().st_size > MAX_SCAN_BYTES:
-                        continue
-                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-                except OSError:
-                    continue
-
-                label = f"{self._root_name(base)}:{rel.as_posix()}"
-                for i, line in enumerate(lines):
-                    if not rx.search(line):
-                        continue
-                    if context:
-                        lo, hi = max(0, i - context), min(len(lines), i + context + 1)
-                        for j in range(lo, hi):
-                            matches.append(f"{label}:{j + 1}:{lines[j]}")
-                    else:
-                        matches.append(f"{label}:{i + 1}:{line}")
+        # One budget for the whole request. It is checked between files, so a
+        # big tree stops promptly, and passed into each search, so a pattern
+        # that backtracks forever on one line stops too.
+        deadline = Deadline(self.grep_timeout_s)
+        matches, truncated, timed_out = [], False, False
+        scanned = 0
+        try:
+            for base in bases:
+                for path in self._walk(base):
                     if len(matches) >= limit:
                         truncated = True
                         break
+                    if deadline.expired():
+                        raise PatternTimeout()
+                    rel = path.relative_to(base)
+                    if glob and not fnmatch(rel.as_posix(), glob):
+                        continue
+                    try:
+                        if path.stat().st_size > MAX_SCAN_BYTES:
+                            continue
+                        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    except OSError:
+                        continue
+                    scanned += 1
 
-        return {"matches": matches[:limit], "count": min(len(matches), limit),
-                "truncated": truncated, "pattern": pattern, "engine": "python"}
+                    label = f"{self._root_name(base)}:{rel.as_posix()}"
+                    for i, line in enumerate(lines):
+                        if not deadline.search(rx, line):
+                            continue
+                        if context:
+                            lo, hi = max(0, i - context), min(len(lines), i + context + 1)
+                            for j in range(lo, hi):
+                                matches.append(f"{label}:{j + 1}:{lines[j]}")
+                        else:
+                            matches.append(f"{label}:{i + 1}:{line}")
+                        if len(matches) >= limit:
+                            truncated = True
+                            break
+        except PatternTimeout:
+            truncated = timed_out = True
+
+        out = {"matches": matches[:limit], "count": min(len(matches), limit),
+               "truncated": truncated, "pattern": pattern, "engine": "python",
+               "files_scanned": scanned}
+        if timed_out:
+            out["reason"] = "timeout"
+            out["note"] = (f"stopped after {self.grep_timeout_s:g}s with {scanned} files "
+                           "scanned. Narrow the root or glob, or simplify the pattern - "
+                           "nested quantifiers like (a+)+ backtrack without bound.")
+        return out
 
     def _walk(self, base: Path):
         for dirpath, dirnames, filenames in os.walk(base):
