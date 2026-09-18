@@ -208,7 +208,14 @@ token** — a copied example cannot go live open by accident.
   `server.err`. `websockets` is a pinned dependency for this reason.
 - **ripgrep is not on this machine's PATH** — it ships inside VS Code and Unity
   bundles behind versioned directory names that rot. `files.py` falls back to a
-  pure-Python scan, so `bridge_grep` reports which engine it used.
+  pure-Python scan, so `bridge_grep` reports which engine it used. Point
+  `ripgrep_path` in `config.json` at a bundled `rg.exe` to use it anyway.
+- **Caller-supplied regexes go through `patterns.py`, never `re`.** The
+  standard library backtracks without bound — `(a|a)*$` on 28 characters takes
+  half a minute — and a peer supplies the pattern. `patterns.Deadline` wraps the
+  `regex` module's per-search timeout in one budget per request (20 s for grep,
+  10 s for the log filter) and reports `reason: "timeout"` with what it managed
+  to scan. ripgrep is a finite automaton and needs none of this.
 - **The venv's `python.exe` is a trampoline.** It re-execs the uv-managed base
   interpreter, so the PID `Start-Process -PassThru` hands back is the *parent*
   of the process holding the socket. Killing the launched PID leaves the port

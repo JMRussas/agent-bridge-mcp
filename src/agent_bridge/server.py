@@ -120,7 +120,7 @@ def build(cfg: Config):
                   max_message_bytes=int(cfg.max_message_bytes),
                   max_bytes=int(cfg.mailbox_max_bytes),
                   debounce_s=float(cfg.mailbox_debounce_s))
-    files = Files(cfg.roots, int(cfg.max_read_bytes))
+    files = Files(cfg.roots, int(cfg.max_read_bytes), ripgrep=cfg.ripgrep_path)
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     avatars = Avatars(cfg.gifterboard, cfg.roots, output_dir=beside_config(cfg.output_dir))
     logs = Logs(cfg.roots)

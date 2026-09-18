@@ -11,6 +11,8 @@
     "sluzzygames": "D:/Git/Sluzzygames"
   },
   "max_read_bytes": 262144,
+  "//ripgrep_path": "Optional path to rg.exe when ripgrep is not on PATH (it ships inside VS Code and Unity Hub bundles). Empty looks on PATH; absent, bridge_grep falls back to a slower Python scan.",
+  "ripgrep_path": "",
   "inbox_max": 200,
   "//mailbox_max_bytes": "Retention: oldest READ messages are evicted past this many bytes of text, or past inbox_max messages. A single message may be at most max_message_bytes.",
   "mailbox_max_bytes": 4194304,

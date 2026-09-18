@@ -14,6 +14,7 @@ from agent_bridge.avatar import rgba_to_png
 from agent_bridge.execute import ExecDenied, Runner
 from agent_bridge.files import Files, PathDenied
 from agent_bridge.mailbox import Mailbox
+from agent_bridge.patterns import Deadline
 
 
 @pytest.fixture
@@ -146,6 +147,41 @@ def test_unknown_root_names_the_known_ones(tree):
     f = Files({"proj": root})
     with pytest.raises(PathDenied, match="proj"):
         f.resolve("nope:src/main.cs")
+
+
+def test_a_catastrophic_pattern_returns_within_the_budget(tree):
+    # AC (B7). "(a|a)*$" against a line of a's backtracks without bound in the
+    # standard library; here it must come back inside the budget and say so.
+    import time
+    root, _ = tree
+    (root / "src" / "evil.txt").write_text("a" * 40 + "b\n")
+    f = Files({"proj": root}, grep_timeout_s=0.5)
+    t = time.perf_counter()
+    res = f._grep_python(r"(a|a)*$", [root], "", 50, 0, False)
+    assert time.perf_counter() - t < 2.0
+    assert res["truncated"] is True and res["reason"] == "timeout"
+    assert "nested quantifiers" in res["note"]
+
+
+def test_the_budget_also_covers_many_files(tree, monkeypatch):
+    # A slow tree, not a slow pattern: the deadline is checked between files.
+    root, _ = tree
+    for i in range(50):
+        (root / "src" / f"f{i}.txt").write_text("nothing here\n")
+    f = Files({"proj": root}, grep_timeout_s=0.2)
+    import time
+    slow = Deadline.search
+    monkeypatch.setattr(Deadline, "search",
+                        lambda self, rx, line: time.sleep(0.02) or slow(self, rx, line))
+    res = f._grep_python("zzz", [root], "", 50, 0, False)
+    assert res["reason"] == "timeout"
+    assert 0 < res["files_scanned"] < 50
+
+
+def test_a_bad_pattern_is_an_error_not_a_crash(tree):
+    root, _ = tree
+    res = Files({"proj": root})._grep_python("(unclosed", [root], "", 50, 0, False)
+    assert "bad regular expression" in res["error"]
 
 
 def test_grep_skips_denied_directories(tree):
@@ -433,6 +469,16 @@ def test_level_and_regex_filters(tmp_path):
     assert lg.read(level="WARNING")["matched_lines"] == 1
     assert lg.read(contains="u=([a-z.]+)")["matched_lines"] == 1
     assert lg.read()["matched_lines"] == 3          # defaults to newest log
+
+
+def test_log_contains_filter_is_bounded_too(tmp_path, monkeypatch):
+    import agent_bridge.logs as logs_mod
+    d = _build(tmp_path)
+    (d / "engine.log").write_text("[INFO] " + "a" * 40 + "b\n")
+    monkeypatch.setattr(logs_mod, "FILTER_TIMEOUT_S", 0.5)
+    res = Logs({"proj": tmp_path}).read("proj:platform/desktop/bin/Debug/engine.log",
+                                        contains=r"(a|a)*$")
+    assert "timed out" in res["error"]
 
 
 def test_only_log_filenames_are_readable(tmp_path):

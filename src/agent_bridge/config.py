@@ -24,6 +24,7 @@ DEFAULTS = {
     "roots": {},
     "allowed_hosts": [],
     "max_read_bytes": 256 * 1024,
+    "ripgrep_path": "",
     "inbox_max": 200,
     "mailbox_max_bytes": 4 * 1024 * 1024,
     "max_message_bytes": 64 * 1024,
