@@ -139,3 +139,16 @@ def test_a_token_the_subprotocol_grammar_cannot_carry_is_refused_at_load():
     with pytest.raises(SystemExit, match="subprotocol"):
         Config({"token": "has=equals"})
     Config({"token": "0123abcd-._~"})          # hex, base64url and unreserved: fine
+
+
+def test_a_clean_shutdown_flushes_the_coalesced_read_state(tmp_path: Path):
+    from agent_bridge.mailbox import Mailbox
+    store = tmp_path / "mailbox.json"
+    cfg = Config({"self_name": "here", "token": TOKEN, "roots": {},
+                  "mailbox_store": str(store), "allowed_hosts": ["testserver:*"]})
+    with TestClient(build(cfg)) as c:
+        c.post("/api/send", json={"sender": "a", "to": "x", "text": "hi"}, headers=BEARER)
+        c.get("/api/inbox?agent=x", headers=BEARER)          # read: coalesced, not yet on disk
+        assert Mailbox(store=store).unread_count("x") == 1
+    # Leaving the context runs the lifespan shutdown, which must flush it.
+    assert Mailbox(store=store).unread_count("x") == 0

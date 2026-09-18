@@ -25,6 +25,8 @@ DEFAULTS = {
     "allowed_hosts": [],
     "max_read_bytes": 256 * 1024,
     "inbox_max": 200,
+    "mailbox_max_bytes": 4 * 1024 * 1024,
+    "max_message_bytes": 64 * 1024,
     "mailbox_store": "mailbox.json",
     "output_dir": "out",
     "exec": {"enabled": False, "timeout": 300, "commands": {}},

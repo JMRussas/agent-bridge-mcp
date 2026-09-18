@@ -214,6 +214,12 @@ token** — a copied example cannot go live open by accident.
   of the process holding the socket. Killing the launched PID leaves the port
   bound and the next start dies on bind. `bridge.ps1` kills by **port owner**,
   and records the listener rather than the launcher.
+- **Read-state writes to `mailbox.json` are coalesced (250 ms); posts are not.**
+  A post is written before it returns, because losing one to a kill is a
+  dropped question. Marking messages read only flips flags, happens on every
+  inbox read and every socket frame, and used to rewrite the whole file each
+  time; those now share one timer. A `Stop-Process -Force` inside that window
+  costs one re-delivery, never a message. A clean shutdown flushes.
 - **Stopping the server must poll for the port to free, not sleep.** A
   signalled process holds the socket for a moment longer, so a fixed
   `Start-Sleep` makes `restart` fail intermittently with "already listening".
