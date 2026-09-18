@@ -94,7 +94,7 @@ product.
   config key so a bundled binary can be pointed at.
   *AC:* `(a+)+$` against a long line of `a`s returns within the limit.
 
-- [ ] **B8 `bridge_run` inherits the full environment** (S)
+- [x] **B8 `bridge_run` inherits the full environment** (S)
   Child processes get `os.environ`, including any API keys in the user's
   shell. Pass a minimal env (`PATH`, `SystemRoot`, `TEMP`, `HOME`/`USERPROFILE`,
   `DOTNET_*` opt-outs) plus an explicit `env` map from the command spec.

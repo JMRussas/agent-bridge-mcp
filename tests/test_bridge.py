@@ -3,15 +3,17 @@
 #
 
 import asyncio
+import json
 import os
 import struct
+import sys
 import zlib
 from pathlib import Path
 
 import pytest
 
 from agent_bridge.avatar import rgba_to_png
-from agent_bridge.execute import ExecDenied, Runner
+from agent_bridge.execute import ExecDenied, Runner, child_env
 from agent_bridge.files import Files, PathDenied
 from agent_bridge.mailbox import Mailbox
 from agent_bridge.patterns import Deadline
@@ -395,6 +397,40 @@ async def test_shell_metacharacters_in_args_are_refused(tmp_path, bad):
 async def test_command_pinned_to_a_root_refuses_another(tmp_path):
     with pytest.raises(ExecDenied, match="only runs in root"):
         await runner(tmp_path).run("autoplay", root="somewhere")
+
+
+# Regression (B8): children used to inherit the server's whole environment,
+# which on a developer box is where the API keys live. An allowlisted command
+# that printed its environment handed them to the peer.
+async def test_child_does_not_inherit_the_servers_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIDGE_TEST_SECRET", "hunter2")
+    cmds = {"env": {"root": "*", "env": {"FROM_SPEC": "yes"},
+                    "argv": [sys.executable, "-c",
+                             "import os, json; print(json.dumps(dict(os.environ)))"]}}
+    result = await Runner(cmds, {"proj": tmp_path}, True).run("env", root="proj")
+
+    assert result["exit_code"] == 0, result["stderr"]
+    seen = json.loads(result["stdout"])
+    assert "BRIDGE_TEST_SECRET" not in seen
+    # What a build tool needs is still there, and the spec's own map wins.
+    assert "PATH" in seen
+    assert seen["FROM_SPEC"] == "yes"
+    assert seen["DOTNET_CLI_TELEMETRY_OPTOUT"] == "1"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows environment names are case-insensitive")
+def test_spec_env_replaces_passthrough_case_insensitively_on_windows():
+    env = child_env({"Path": r"C:\only"})
+    matches = [k for k in env if k.upper() == "PATH"]
+    assert matches == ["Path"], env
+    assert env["Path"] == r"C:\only"
+
+
+@pytest.mark.parametrize("bad", ["GIT_TERMINAL_PROMPT=0", ["A=1"], {"A": 1}, {1: "x"}])
+async def test_malformed_spec_env_is_a_refusal_not_a_crash(tmp_path, bad):
+    cmds = {"x": {"root": "*", "argv": ["git", "status"], "env": bad}}
+    with pytest.raises(ExecDenied, match="malformed env"):
+        await Runner(cmds, {"proj": tmp_path}, True).run("x", root="proj")
 
 
 # --- png encoder -----------------------------------------------------------
