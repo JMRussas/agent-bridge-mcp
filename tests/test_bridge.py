@@ -59,6 +59,88 @@ def test_root_prefix_resolves_and_reads(tree):
     assert out["total_lines"] == 2
 
 
+def test_a_slice_of_a_large_file_does_not_load_the_file(tree):
+    # Regression: any count>0 read the whole file and then sliced it, so the
+    # size cap only ever applied to count=0. A 2 GB file with count=1 was a
+    # 2 GB read.
+    import tracemalloc
+    root, _ = tree
+    big = root / "src" / "big.log"
+    with big.open("w") as f:
+        for i in range(200_000):
+            f.write(f"line {i} " + "x" * 40 + "\n")     # ~10 MB
+    size = big.stat().st_size
+    assert size > 8_000_000
+
+    f = Files({"proj": root}, max_read_bytes=256 * 1024)
+    tracemalloc.start()
+    out = f.read("proj:src/big.log", start=100_001, count=5)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert out["returned"] == 5
+    assert out["text"].splitlines()[0].startswith("100001\tline 100000 ")
+    assert out["total_lines"] == 200_000
+    assert peak < size // 4, f"peak {peak} bytes for a 5-line slice of a {size}-byte file"
+
+
+def test_whole_file_over_the_cap_is_still_refused(tree):
+    root, _ = tree
+    (root / "src" / "fat.txt").write_text("y" * 3000)
+    f = Files({"proj": root}, max_read_bytes=2000)
+    with pytest.raises(PathDenied, match="over the 2000 limit"):
+        f.read("proj:src/fat.txt")
+
+
+def test_a_slice_is_capped_by_bytes_not_only_by_count(tree):
+    root, _ = tree
+    (root / "src" / "wide.txt").write_text("\n".join("a" * 100 for _ in range(50)))
+    f = Files({"proj": root}, max_read_bytes=350)
+    out = f.read("proj:src/wide.txt", start=1, count=50)
+    assert out["truncated"] is True
+    assert out["returned"] == 3                           # 3 x 101 bytes fits, 4 does not
+    assert "next line is 4" in out["note"]
+    assert out["total_lines"] == 50                       # still counted to the end
+
+
+def test_a_line_longer_than_the_cap_is_still_readable(tree):
+    # Regression (review): a single over-cap line was dropped whole, with a note
+    # pointing the caller back at the same line - an infinite loop.
+    root, _ = tree
+    (root / "src" / "long.txt").write_text("short\n" + "z" * 5000 + "\nafter\n")
+    f = Files({"proj": root}, max_read_bytes=2000)
+    out = f.read("proj:src/long.txt", start=2, count=1)
+    assert out["returned"] == 1
+    assert out["truncated"] is True and "longer than the 2000-byte limit" in out["note"]
+    assert out["text"] == "2\t" + "z" * 2000
+    assert out["total_lines"] == 3
+
+
+def test_the_cap_counts_bytes_not_characters(tree):
+    # Regression (review): len(str) passed a 1500-char CJK line through a
+    # 2000-byte cap and returned 4500 bytes.
+    root, _ = tree
+    cjk = "\u4e2d" * 1000                                 # 3000 bytes per line
+    (root / "src" / "cjk.txt").write_text("\n".join([cjk] * 3), encoding="utf-8")
+    f = Files({"proj": root}, max_read_bytes=7000)
+    out = f.read("proj:src/cjk.txt", start=1, count=3)
+    assert out["returned"] == 2 and out["truncated"] is True
+    assert "next line is 3" in out["note"]
+
+    # And a cut never lands mid-character.
+    out = Files({"proj": root}, max_read_bytes=1000).read("proj:src/cjk.txt", start=1, count=1)
+    body = out["text"].split("\t", 1)[1]
+    assert "\ufffd" not in body and len(body.encode()) <= 1000 and body == "\u4e2d" * 333
+
+
+def test_crlf_files_read_the_same_as_lf(tree):
+    root, _ = tree
+    (root / "src" / "win.txt").write_bytes(b"one\r\ntwo\r\nthree")
+    out = Files({"proj": root}).read("proj:src/win.txt")
+    assert out["total_lines"] == 3
+    assert out["text"] == "1\tone\n2\ttwo\n3\tthree"
+
+
 def test_unknown_root_names_the_known_ones(tree):
     root, _ = tree
     f = Files({"proj": root})

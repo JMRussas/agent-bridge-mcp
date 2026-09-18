@@ -75,7 +75,7 @@ product.
   *AC:* extend `test_ws_backlog_marked_read_is_not_replayed_after_restart`
   with a live message.
 
-- [ ] **B5 `bridge_read` size cap bypassed by `count > 0`** (S)
+- [x] **B5 `bridge_read` size cap bypassed by `count > 0`** (S)
   Whole file is read into memory regardless. Iterate lines and stop at
   `start + count`; enforce `max_read_bytes` on the *returned* slice.
   *AC:* a 10 MB fixture with `count=5` returns 5 lines and peak memory does
@@ -175,7 +175,8 @@ product.
   Lower-case keys once in `Config`; reject unknown top-level keys with a
   message naming the nearest valid one; the DENY_PARTS check in
   `Files.resolve` must inspect parents *below* the root only (a root that
-  lives under a folder named `bin` is currently unreadable).
+  lives under a folder named `bin` is currently unreadable). Refuse
+  one-letter root names: `t:big.log` parses as a Windows drive letter.
 
 - [ ] **G4 pure-ASGI auth middleware** (S)
   `BaseHTTPMiddleware` has known trouble with streaming responses and
