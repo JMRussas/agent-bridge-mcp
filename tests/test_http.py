@@ -39,8 +39,14 @@ def client(tmp_path: Path):
 # Regression: the query-string token was accepted on every route, so it worked
 # in a plain GET and landed in access logs. It is for the WebSocket only.
 
-def test_health_needs_no_token(client):
-    assert client.get("/api/health").status_code == 200
+def test_health_needs_no_token_and_says_only_what_reachability_needs(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    # S7: names, unread counts and roots are behind auth. An unauthenticated
+    # caller learns how to diagnose reachability and nothing about traffic.
+    assert set(r.json()) == {"ok", "self", "host_seen", "allowed_hosts", "host_allowed", "your_address"}
+    assert client.get("/api/agents").status_code == 401
+    assert client.get("/api/agents", headers=BEARER).status_code == 200
 
 
 def test_rest_refuses_without_token(client):
@@ -155,7 +161,7 @@ AS_PEER = {"Authorization": f"Bearer {PEER}"}
 def peered(tmp_path: Path):
     cfg = Config({
         "self_name": "here", "token": TOKEN, "roots": {}, "mailbox_store": "",
-        "peers": {"sisyphus": {"token": PEER}},
+        "agents": {"sisyphus": {"token": PEER}},
         "allowed_hosts": ["testserver:*"],
     })
     with TestClient(build(cfg)) as c:
@@ -215,7 +221,7 @@ def test_the_admins_default_mailbox_is_normalised(tmp_path: Path):
 
 def test_a_placeholder_admin_token_does_not_authenticate_when_peers_exist(tmp_path: Path):
     cfg = Config({"self_name": "here", "token": "CHANGE_ME", "mailbox_store": "",
-                  "peers": {"sisyphus": {"token": PEER}}, "allowed_hosts": ["testserver:*"]})
+                  "agents": {"sisyphus": {"token": PEER}}, "allowed_hosts": ["testserver:*"]})
     with TestClient(build(cfg)) as c:
         assert c.get("/api/inbox", headers={"Authorization": "Bearer CHANGE_ME"}).status_code == 401
         assert c.get("/api/inbox", headers=AS_PEER).status_code == 200

@@ -363,6 +363,14 @@ async def test_subscriber_receives_live_fanout():
         await asyncio.wait_for(q.get(), timeout=0.1)
 
 
+def test_the_mailbox_store_is_denied_even_under_a_root(tmp_path):
+    # A root containing the bridge's own checkout must not make bridge_read a
+    # way around the per-agent mailbox boundary.
+    (tmp_path / "mailbox.json").write_text("{}")
+    with pytest.raises(PathDenied):
+        Files({"r": tmp_path}).resolve("r:mailbox.json")
+
+
 # --- execution allowlist ---------------------------------------------------
 
 CMDS = {"git-status": {"root": "*", "argv": ["git", "status"]},

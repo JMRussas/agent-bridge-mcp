@@ -28,7 +28,10 @@ from agent_bridge.patterns import Deadline, PatternTimeout, compile_pattern
 # Anything here is either huge, binary, or someone's credentials. Skipped by
 # list and grep, and refused by read.
 DENY_PARTS = {".git", "node_modules", "obj", "bin", ".venv", "__pycache__", ".vs"}
-DENY_NAMES = {".env", ".credentials.json", "config.json", "id_rsa", ".npmrc"}
+# mailbox.json is every message this bridge has carried; a root that happens
+# to contain the bridge's own checkout must not turn bridge_read into a way
+# around the per-agent mailbox boundary.
+DENY_NAMES = {".env", ".credentials.json", "config.json", "mailbox.json", "id_rsa", ".npmrc"}
 
 # Only used by the Python grep fallback: art, binaries and compiled assets are
 # most of the bytes in these trees and none of the answers.

@@ -1,8 +1,9 @@
 # agent-bridge-mcp
 
-An MCP server that lets a Claude agent on one machine talk to the agent on
-another — and, more usefully, lets it answer most of its own questions without
-waiting for a reply.
+An MCP server that lets coding agents — Claude Code, Codex, a script, on one
+machine or several — talk to each other through a durable mailbox, and, more
+usefully, lets an agent answer most of its own questions about another
+machine's source without waiting for a reply.
 
 Built for a two-machine split where the source for both halves of a system lives
 on one box and the running service lives on another, so the contract between
@@ -27,18 +28,24 @@ built to debug.
 ```powershell
 uv venv .venv
 uv pip install --python .venv\Scripts\python.exe -e .
-.venv\Scripts\agent-bridge init             # writes config.json with a generated token
+.venv\Scripts\agent-bridge init             # writes config.json with the admin token
                                           # then add your roots to it
 tools\bridge.ps1 start
 tools\bridge.ps1 firewall                 # elevated shell, opens the port to LocalSubnet
 ```
 
-From the other machine:
+Then one credential per agent — a role name and a line on what it is:
 
 ```powershell
-claude mcp add --transport http <name> http://<host>:8791/mcp `
-  --header "Authorization: Bearer <token>"
+.venv\Scripts\agent-bridge agent add sisyphus  --description "Claude Code on the other box"
+.venv\Scripts\agent-bridge agent add rl-claude --description "Claude Code in this repo" --local
+.venv\Scripts\agent-bridge agent add rl-codex  --description "Codex CLI in this repo"    --local
 ```
+
+Each prints the `claude mcp add` / `codex mcp add` lines to paste where that
+agent runs. The token *is* the identity: an agent sends as its own name and
+reads only its own mailbox. The admin token from `init` is for you at a shell,
+not for an agent.
 
 `curl http://<host>:8791/api/health` needs no token and separates "firewall"
 from "wrong token" in one step.
@@ -57,7 +64,9 @@ they are range-checked against the roots, and the exec allowlist is keyed by
 name so a caller never composes a command line.
 
 See [CLAUDE.md](CLAUDE.md) for the full reference, the security posture, and the
-gotchas that cost real time.
+gotchas that cost real time; [docs/identity.md](docs/identity.md) for what an
+agent, a credential and an instance are and why; [docs/threat-model.md](docs/threat-model.md)
+for prompt injection, which is the threat this design is actually about.
 
 ## Tests
 

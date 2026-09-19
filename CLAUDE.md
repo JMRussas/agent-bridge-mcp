@@ -13,10 +13,10 @@ nothing checks it, which is what this bridge exists to fix.
 
 | What | Command |
 |------|---------|
-| First run | `.venv\Scripts\agent-bridge init` (writes `config.json`, generates the token, prints the peer commands) |
+| First run | `.venv\Scripts\agent-bridge init` (writes `config.json`, generates the admin token, prints its registration commands) |
 | Show / rotate the admin token | `.venv\Scripts\agent-bridge token` / `token --rotate` |
-| Give a peer its own credential | `.venv\Scripts\agent-bridge peer add sisyphus` (prints that peer's commands) |
-| List / show / remove peers | `agent-bridge peer list` / `peer show <name>` / `peer remove <name>` |
+| Give an agent its credential | `.venv\Scripts\agent-bridge agent add rl-claude --description "Claude Code in D:/Git/Rogue-Lite" [--local]` (prints its registration for Claude Code and Codex) |
+| List / show / remove agents | `agent-bridge agent list` / `agent show <name>` / `agent remove <name>` |
 | Start | `tools\bridge.ps1 start` |
 | Status | `tools\bridge.ps1 status` |
 | Stop / restart | `tools\bridge.ps1 stop` / `restart` |
@@ -32,7 +32,7 @@ start is almost always the port already being held — `status` says so.
 ```
 src/agent_bridge/
   server.py     FastMCP tools + the WS and REST routes; the only file that knows about HTTP
-  auth.py       credential -> Principal (peer name or admin); which mailbox a caller may touch
+  auth.py       credential -> Principal (agent name or admin); which mailbox a caller may touch
   mailbox.py    durable message store + live fan-out
   files.py      scoped read/list/grep over the configured roots
   execute.py    allowlisted command runner
@@ -56,24 +56,51 @@ One process, one port (**8791**), three ways in:
 MCP server without restarting, so the agent on this machine would otherwise be
 unable to answer a message until the next session. `curl` always works.
 
-## Connecting from another machine
+## Vocabulary
 
-On FENRIR, give SISYPHUS a credential of its own — `agent-bridge peer add
-sisyphus` — and paste what it prints. On SISYPHUS, with FENRIR at
-`192.168.1.174`, that is:
+Four words, used precisely; [docs/identity.md](docs/identity.md) has the
+reasoning and the alternatives that were rejected.
+
+- **agent** — a *name* in the mailbox. A role: "the Claude in Rogue-Lite",
+  "the Codex in Rogue-Lite", "the GifterBoard bot". Anything can be behind it
+  and the bridge neither knows nor cares. Not a machine, not a conversation.
+- **credential** — proves an agent name. One per role, issued by the operator
+  with `agent add`. It is the *only* source of identity: the sender of a
+  message and the mailbox a request may touch follow from it, never from the
+  request body.
+- **admin** — this bridge's own credential (the single `token`). Its name is
+  `self_name` and it may act as anyone. For the operator — scripts, local
+  `curl` — **never for an agent**: an agent on the admin token sends as
+  `fenrir`, reads every mailbox, and the whole boundary evaporates.
+- **peer** — prose only: a remote machine. Not a thing in the code.
+
+An **instance** (`rl-claude#3f2a`) is one session of a role — the addressing is
+reserved now, delivered in S1b. Instances share their role's credential and
+trust; if two things must not read each other's mail, they are two roles.
+
+## Connecting an agent
+
+On FENRIR, give the agent a credential — a role name and one line on what it
+is — and paste what it prints where that agent runs:
 
 ```powershell
-claude mcp add --transport http fenrir `
-  http://192.168.1.174:8791/mcp `
-  --header "Authorization: Bearer <sisyphus's token, from `peer add`>"
+.venv\Scripts\agent-bridge agent add sisyphus --description "Claude Code on SISYPHUS, runs GifterBoard"
+.venv\Scripts\agent-bridge agent add rl-claude --description "Claude Code in D:/Git/Rogue-Lite" --local
+.venv\Scripts\agent-bridge agent add rl-codex  --description "Codex CLI in D:/Git/Rogue-Lite" --local
 ```
 
-**The token is the identity.** A request with SISYPHUS's token *is* `sisyphus`:
-its messages carry that sender whatever the body says, and `bridge_inbox`,
-`bridge_wait` and `/notify` default to — and are confined to — its own mailbox.
-The single `token` in `config.json` is the **admin** credential: it may name
-any sender and read any mailbox, including the `*` wildcard listener. It is for
-the agent on this machine and for `curl` from a local shell, not for peers.
+Each prints a `claude mcp add` line (run it *in the directory that agent works
+in*; the default `local` scope keeps the token in `~/.claude.json` — never
+`--scope project`, which commits it to `.mcp.json`) and a `codex mcp add` line
+(the token goes in an environment variable, never on the command line).
+`--local` prints loopback instead of the LAN address.
+
+A request with `rl-claude`'s token *is* `rl-claude`: its messages carry that
+sender whatever the body says, and `bridge_inbox`, `bridge_wait` and `/notify`
+default to — and are confined to — its own mailbox. Two agents in the same
+repo on the same box are two credentials; a reply to one is invisible to the
+other. `bridge_agents` is the directory: every credentialed agent with its
+description, so a remote agent can pick who to ask.
 
 Check it first without Claude Code — `/api/health` needs no token and is the
 fastest way to tell "firewall" apart from "wrong token":
@@ -116,7 +143,7 @@ the implementation:
 
 | Tool | Purpose |
 |---|---|
-| `bridge_whoami` / `bridge_peers` / `bridge_roots` | what this machine is and what it exposes |
+| `bridge_whoami` / `bridge_agents` / `bridge_roots` | what this machine is, who is reachable, what it exposes |
 | `bridge_send` / `bridge_inbox` / `bridge_history` | the mailbox |
 | `bridge_list` / `bridge_read` / `bridge_grep` | read-only source access |
 | `bridge_commands` / `bridge_run` | allowlisted execution |
@@ -177,25 +204,38 @@ not a wrapper around it:
    any file the server's user could.
 
 7. **Identity comes from the credential, never from the request body.**
-   `auth.Credentials` resolves a bearer token to a `Principal`: a peer's token
-   names that peer (`peers` in `config.json`), the single `token` is the admin.
-   `bridge_send(sender=...)` is honoured only for the admin; a peer's messages
-   carry its own name. A peer may read, wait on or listen to its own mailbox
-   only; the admin may name any, including `*`. Tools learn who called them
-   from the Starlette request the streamable-HTTP transport attaches to the
-   tool context, re-checked against the same header the middleware verified.
+   `auth.Credentials` resolves a bearer token to a `Principal`: an agent's
+   token names that agent (`agents` in `config.json`), the single `token` is
+   the admin. `bridge_send(sender=...)` is honoured only for the admin; an
+   agent's messages carry its own name. An agent may read, wait on or listen
+   to its own mailbox (or an instance of it, `name#…`) only; the admin may
+   name any, including `*`. Tools learn who called them from the Starlette
+   request the streamable-HTTP transport attaches to the tool context,
+   re-checked against the same header the middleware verified.
    `tests/test_identity.py` proves this through a real uvicorn session,
    because a unit test cannot see whether the SDK actually attached it.
+8. **`/api/health` is the only unauthenticated route and says nothing about
+   traffic** — `ok`, `self`, and the Host-allowlist diagnostics. Names, unread
+   counts and roots are behind auth (`/api/agents`, `bridge_roots`).
+9. **`mailbox.json` is on the deny list**, so a root that contains the bridge's
+   own checkout cannot turn `bridge_read` into a way around the mailbox
+   boundary.
 
 Credentials live in `config.json` (gitignored). `agent-bridge init` generates
-the admin token (32 random bytes as hex); `agent-bridge peer add <name>`
-generates a peer's. `token --rotate` / `peer add --rotate` replace one; then
-restart the bridge and re-run `claude mcp add` where it was used. Config
-loading refuses a peer with a blank or placeholder token, a peer named after
-this machine or `*`, and any two credentials that are equal. **A placeholder
-admin token (`CHANGE_ME`) is never accepted as a credential**, and **serving
-refuses to bind anything but loopback with no credential at all** (no usable
-admin token *and* no peers) — a copied example cannot go live open by accident.
+the admin token (32 random bytes as hex); `agent-bridge agent add <name>`
+generates an agent's. `token --rotate` / `agent add --rotate` replace one;
+then restart the bridge and re-register where it was used. Config loading
+refuses an agent with a blank or placeholder token, a name that is this
+machine's or `*` or contains `#`, and any two credentials that are equal.
+**A placeholder admin token (`CHANGE_ME`) is never accepted as a credential**,
+and **serving refuses to bind anything but loopback with no credential at
+all** (no usable admin token *and* no agents) — a copied example cannot go
+live open by accident.
+
+The threat that matters most here is not the network; it is **prompt
+injection through the content the bridge carries** — messages, and the game
+logs that contain viewer chat from the internet. [docs/threat-model.md](docs/threat-model.md)
+ranks the vectors and the controls, in the order they are being built.
 
 ## Gotchas
 

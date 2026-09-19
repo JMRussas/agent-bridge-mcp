@@ -20,9 +20,9 @@
 # this binds to a LAN address and not to the internet.
 #
 # The token is also the identity. auth.Credentials resolves it to a Principal:
-# a peer's token names that peer, the single "token" is the admin. The sender
-# of a message and the mailbox a request may touch follow from that, never
-# from the request body.
+# an agent's token names that agent, the single "token" is the admin. The
+# sender of a message and the mailbox a request may touch follow from that,
+# never from the request body.
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -75,7 +75,7 @@ def UNAUTHORISED() -> JSONResponse:
 def FORBIDDEN(e: Forbidden) -> JSONResponse:
     return JSONResponse({
         "error": str(e),
-        "hint": "a peer credential reads its own mailbox only; leave `agent` "
+        "hint": "an agent's credential reads its own mailbox only; leave `agent` "
                 "empty or pass your own name. The admin token may name any.",
     }, status_code=403)
 
@@ -137,7 +137,7 @@ def build(cfg: Config):
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     avatars = Avatars(cfg.gifterboard, cfg.roots, output_dir=beside_config(cfg.output_dir))
     logs = Logs(cfg.roots)
-    creds = Credentials(cfg.self_name, cfg.token, cfg.peers)
+    creds = Credentials(cfg.self_name, cfg.token, cfg.agents)
 
     hosts = allowed_hosts(cfg)
     mcp = FastMCP(
@@ -193,6 +193,26 @@ def build(cfg: Config):
     def as_json(p: Principal) -> dict:
         return {"name": p.name, "admin": p.admin}
 
+    # The directory: the one list a remote agent needs to decide who to ask.
+    # Configured agents come with their description; the admin is listed as
+    # the operator; names that only ever appeared in traffic (the admin
+    # sending as "script", mail addressed to a name nobody holds) are shown
+    # too, flagged, so a typo in `to` is visible rather than a silent mailbox.
+    def directory() -> list[dict]:
+        seen = {m["name"]: m for m in box.mailboxes()}
+        out = [{"name": creds.self_name, "credentialed": True, "admin": True,
+                "description": "this bridge's operator (admin credential; scripts and local curl)",
+                **{k: v for k, v in seen.pop(creds.self_name, {}).items() if k != "name"}}]
+        for name, spec in sorted(cfg.agents.items()):
+            m = seen.pop(name, {})
+            out.append({"name": name, "credentialed": True, "admin": False,
+                        "description": spec.get("description", ""),
+                        "unread": m.get("unread", 0),
+                        "last_seen_s_ago": m.get("last_seen_s_ago")})
+        out.extend({**m, "credentialed": False, "admin": False, "description": ""}
+                   for _, m in sorted(seen.items()))
+        return out
+
     # --- mailbox -----------------------------------------------------------
 
     @mcp.tool()
@@ -206,12 +226,12 @@ def build(cfg: Config):
             "commands": sorted(cfg.commands),
             "gifterboard_url": avatars.url or "(unset)",
             "grep_engine": files.engine(),
-            "peers": box.peers(),
+            "agents": directory(),
         }
 
-    # The sender is whoever authenticated. A peer cannot claim another name;
-    # the admin credential may, because the agent on this machine speaks
-    # through it on behalf of "local", a script, or itself.
+    # The sender is whoever authenticated. An agent cannot claim another
+    # name; the admin credential may, because the operator speaks through it
+    # on behalf of a script, a shell, or the machine itself.
     def sender_for(me: Principal, claimed: str) -> str:
         return (claimed.strip() or me.name) if me.admin else me.name
 
@@ -237,8 +257,8 @@ def build(cfg: Config):
     def bridge_inbox(agent: str = "", limit: int = 20, peek: bool = False, thread: str = "") -> dict:
         """Read your unread messages, marking them read.
 
-        `agent` defaults to your authenticated name; a peer may not name
-        another. Pass peek=true to look without consuming.
+        `agent` defaults to your authenticated name; another agent's may
+        not be named. Pass peek=true to look without consuming.
         """
         try:
             agent = creds.mailbox_for(caller(), agent)
@@ -259,7 +279,7 @@ def build(cfg: Config):
         timeout it returns an empty list, which is not an error - just call it
         again. This is the WebSocket's latency without the WebSocket, for a
         client that cannot open one. `agent` defaults to your authenticated
-        name; a peer may not name another.
+        name; another agent's may not be named.
         """
         try:
             agent = creds.mailbox_for(caller(), agent)
@@ -277,8 +297,8 @@ def build(cfg: Config):
     def bridge_history(agent: str = "", limit: int = 50, thread: str = "") -> dict:
         """Recent traffic, read or not, for context on an ongoing thread.
 
-        A peer sees the messages it sent or received; the admin sees all, or
-        one agent's when `agent` is given.
+        An agent sees the messages it sent or received; the admin sees all,
+        or one agent's when `agent` is given.
         """
         me = caller()
         if not me.admin:
@@ -289,9 +309,15 @@ def build(cfg: Config):
         return {"messages": [m.as_dict() for m in box.history(agent, limit, thread)]}
 
     @mcp.tool()
-    def bridge_peers() -> dict:
-        """Which agents have used this bridge, and what is waiting for each."""
-        return {"peers": box.peers(), "self": cfg.self_name}
+    def bridge_agents() -> dict:
+        """Who is reachable through this bridge, and who to ask.
+
+        Every credentialed agent with its one-line description and what is
+        waiting for it, plus names that have only appeared in traffic. Pick
+        the agent whose description fits the question; the admin entry is the
+        operator, not an agent.
+        """
+        return {"agents": directory(), "self": cfg.self_name}
 
     @mcp.tool()
     async def bridge_capabilities() -> dict:
@@ -304,7 +330,7 @@ def build(cfg: Config):
         groups: dict[str, list] = {}
         for t in registered:
             group = ("mailbox" if t.name.startswith("bridge_") and
-                     t.name.split("_")[1] in ("send", "inbox", "history", "peers",
+                     t.name.split("_")[1] in ("send", "inbox", "history", "agents",
                                               "whoami", "capabilities")
                      else "source" if t.name in ("bridge_read", "bridge_grep",
                                                  "bridge_list", "bridge_roots")
@@ -351,14 +377,14 @@ def build(cfg: Config):
                                     "from a token problem from a Host-allowlist 421",
                 "GET  /api/inbox?agent=&limit=&peek=": "same mailbox; agent defaults to you",
                 "POST /api/send": '{"to","text","thread"} - sender is your authenticated name',
-                "GET  /api/peers": "who has used this bridge",
+                "GET  /api/agents": "the directory: who is reachable and who to ask",
                 "GET  /api/wait?agent=&timeout=": "long-poll; returns the instant mail arrives, or empty on timeout. The curl twin of bridge_wait.",
                 "why": "An agent already mid-session cannot gain a new MCP server "
                        "without restarting, but it can always shell out to curl.",
             },
             "roots": {k: str(v) for k, v in cfg.roots.items()},
             "commands": sorted(cfg.commands) if cfg.exec_enabled else [],
-            "peers": box.peers(),
+            "agents": directory(),
             "hazards": [
                 "BACKSLASHES: Windows paths have been corrupted repeatedly in "
                 "messages through this bridge (\\a and \\t eaten as escapes), which "
@@ -369,7 +395,7 @@ def build(cfg: Config):
                 "builds_without_engine_log and compares each log to the exe beside "
                 "it - read those fields before concluding anything from an absence.",
                 ("YOU ARE THE ADMIN: this credential may read any mailbox and send "
-                 "under any name. Peers with their own credentials cannot."
+                 "under any name. Agents with their own credentials cannot."
                  if me.admin else
                  f"YOU ARE '{me.name}': your messages carry that name whatever "
                  f"`sender` says, and you read only your own mailbox."),
@@ -510,11 +536,13 @@ def build(cfg: Config):
         # can diagnose it from ITS OWN side in one request. The Host header is
         # the address the caller dialled - this machine - never the caller's own
         # name, which is the thing that makes the allowlist confusing.
+        # Nothing else: names, unread counts and roots are behind auth
+        # (/api/agents, bridge_roots). This route is the one unauthenticated
+        # surface and it says only what is needed to tell "firewall" from
+        # "wrong token" from "Host allowlist".
         return JSONResponse({
             "ok": True,
             "self": cfg.self_name,
-            "peers": box.peers(),
-            "roots": sorted(cfg.roots),
             "host_seen": request.headers.get("host", ""),
             "allowed_hosts": hosts,
             "host_allowed": _host_ok(request.headers.get("host", ""), hosts),
@@ -542,8 +570,8 @@ def build(cfg: Config):
         return JSONResponse({"agent": agent, "count": len(msgs),
                              "messages": [m.as_dict() for m in msgs]})
 
-    async def api_peers(request: Request):
-        return JSONResponse({"peers": box.peers()})
+    async def api_agents(request: Request):
+        return JSONResponse({"agents": directory(), "self": cfg.self_name})
 
     # The curl-shaped twin of bridge_wait, for a peer whose WebSocket client is
     # restricted (Claude Code's Monitor refuses private-range addresses, which
@@ -571,7 +599,7 @@ def build(cfg: Config):
             return
         # Normalised the same way the mailbox does (inside mailbox_for), or
         # "x " subscribes as "x" and then never matches m.to when deciding
-        # what to consume. A peer listens as itself; only the admin may
+        # what to consume. An agent listens as itself; only the admin may
         # listen as someone else or as the wildcard.
         try:
             agent = creds.mailbox_for(me, ws.query_params.get("agent", ""))
@@ -642,7 +670,7 @@ def build(cfg: Config):
     app.routes.append(Route("/api/health", health, methods=["GET"]))
     app.routes.append(Route("/api/send", api_send, methods=["POST"]))
     app.routes.append(Route("/api/inbox", api_inbox, methods=["GET"]))
-    app.routes.append(Route("/api/peers", api_peers, methods=["GET"]))
+    app.routes.append(Route("/api/agents", api_agents, methods=["GET"]))
     app.routes.append(Route("/api/wait", api_wait, methods=["GET"]))
     app.add_middleware(Auth)
     return app
@@ -684,10 +712,10 @@ def is_loopback(host: str) -> bool:
 # warn and bind anyway - on 0.0.0.0, the default. This server reads source and
 # runs commands; an open bind is refused, not logged. Loopback with no
 # credential is still allowed, because that is how a single-machine setup
-# works. A per-peer credential counts: a config with peers and no admin token
+# works. An agent credential counts: a config with agents and no admin token
 # is closed, not open.
-def refuse_open_bind(host: str, token: str, peers: dict | None = None) -> None:
-    if (not token or token in PLACEHOLDER_TOKENS) and not peers and not is_loopback(host):
+def refuse_open_bind(host: str, token: str, agents: dict | None = None) -> None:
+    if (not token or token in PLACEHOLDER_TOKENS) and not agents and not is_loopback(host):
         what = "no token" if not token else "the placeholder token"
         raise SystemExit(
             f"refusing to bind {host} with {what}: every machine that can reach "
@@ -702,14 +730,14 @@ def serve(config: str | None = None, host: str | None = None, port: int | None =
 
     host = host or cfg.host
     port = port or int(cfg.port)
-    refuse_open_bind(host, cfg.token, cfg.peers)
-    creds = Credentials(cfg.self_name, cfg.token, cfg.peers)
+    refuse_open_bind(host, cfg.token, cfg.agents)
+    creds = Credentials(cfg.self_name, cfg.token, cfg.agents)
     if creds.open:
         log.warning("no credential set - anything on this machine can use this bridge as admin")
     elif not creds.admin_token:
-        log.warning("the admin token is a placeholder and is NOT accepted; only peers can connect")
-    for name in cfg.peers:
-        log.info("  peer %-14s (own credential)", name)
+        log.warning("the admin token is a placeholder and is NOT accepted; only agents can connect")
+    for name, spec in cfg.agents.items():
+        log.info("  agent %-14s %s", name, spec.get("description") or "(no description)")
 
     log.info("agent-bridge '%s' on http://%s:%d  (mcp=/mcp  ws=/notify  rest=/api)",
              cfg.self_name, host, port)

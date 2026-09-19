@@ -38,7 +38,8 @@ def _free_port() -> int:
 async def mcp_url():
     port = _free_port()
     cfg = Config({"self_name": "here", "token": ADMIN, "mailbox_store": "",
-                  "peers": {"a": {"token": PEER_A}, "b": {"token": PEER_B}},
+                  "agents": {"a": {"token": PEER_A, "description": "Claude Code in Rogue-Lite"},
+                             "b": {"token": PEER_B, "description": "Codex CLI in Rogue-Lite"}},
                   "allowed_hosts": ["127.0.0.1:*"]})
     server = uvicorn.Server(uvicorn.Config(build(cfg), host="127.0.0.1", port=port,
                                            log_level="warning"))
@@ -104,7 +105,48 @@ async def test_a_peers_history_is_its_own_traffic(mcp_url):
     assert len(everything) == 3
 
 
+# Two agents in the same repo on the same machine - the case that made the
+# credential a ROLE rather than a machine. The bridge cannot see where either
+# runs; what it guarantees is that a reply to one is invisible to the other.
+async def test_two_agents_in_one_repo_do_not_see_each_others_mail(mcp_url):
+    await call(mcp_url, PEER_A, "bridge_send", to="here", text="from a: what is AvatarSize?")
+    await call(mcp_url, PEER_B, "bridge_send", to="here", text="from b: build is red")
+    await call(mcp_url, ADMIN, "bridge_send", to="a", text="64")
+    await call(mcp_url, ADMIN, "bridge_send", to="b", text="known, fixing")
+
+    a_sees = (await call(mcp_url, PEER_A, "bridge_inbox"))["messages"]
+    b_sees = (await call(mcp_url, PEER_B, "bridge_inbox"))["messages"]
+    assert [m["text"] for m in a_sees] == ["64"]
+    assert [m["text"] for m in b_sees] == ["known, fixing"]
+    # The admin's own mailbox has both questions, each provably from its author.
+    ours = (await call(mcp_url, ADMIN, "bridge_inbox"))["messages"]
+    assert [(m["sender"], m["text"][:6]) for m in ours] == [("a", "from a"), ("b", "from b")]
+
+
+async def test_the_directory_says_who_to_ask(mcp_url):
+    await call(mcp_url, ADMIN, "bridge_send", to="b", text="hi", sender="script")
+    agents = (await call(mcp_url, PEER_A, "bridge_agents"))["agents"]
+    by_name = {e["name"]: e for e in agents}
+    assert by_name["a"]["description"] == "Claude Code in Rogue-Lite" and by_name["a"]["credentialed"]
+    assert by_name["b"]["unread"] == 1 and by_name["b"]["credentialed"]
+    assert by_name["here"]["admin"] and by_name["here"]["credentialed"]
+    # A name that only ever appeared in traffic is listed, and flagged.
+    assert by_name["script"]["credentialed"] is False
+
+
 # --- the pure part ---------------------------------------------------------------
+
+def test_an_instance_of_a_role_is_the_roles_own_mailbox():
+    # Reserved for S1b: "rl-claude#3f2a" is one session of rl-claude. It shares
+    # the role's credential, so it is the role's to read; nobody else's.
+    c = Credentials("here", ADMIN, {"a": {"token": PEER_A}, "b": {"token": PEER_B}})
+    a, b = c.identify(PEER_A), c.identify(PEER_B)
+    assert c.mailbox_for(a, "a#3f2a") == "a#3f2a"
+    with pytest.raises(Forbidden):
+        c.mailbox_for(b, "a#3f2a")
+    with pytest.raises(Forbidden):
+        c.mailbox_for(b, "ab")        # a prefix is not an instance
+
 
 def test_credentials_resolve_in_constant_shape():
     c = Credentials("here", ADMIN, {"a": {"token": PEER_A}})

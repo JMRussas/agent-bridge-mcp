@@ -2,16 +2,21 @@
 #  agent-bridge-mcp - Copyright(c) 2026
 #
 
-# The command line: `agent-bridge serve|init|token`.
+# The command line: `agent-bridge serve|init|token|agent`.
 #
 # `serve` with no subcommand is the default, so `python -m agent_bridge` and
 # bridge.ps1 keep working unchanged. `init` exists because the token used to be
 # set by hand-editing a copied example, which is how CHANGE_ME ends up live on a
-# LAN interface. `token` prints the exact commands a peer needs, so the string
-# never has to be transcribed, and rotates it in one step.
+# LAN interface. `token` prints the exact commands the admin credential needs,
+# so the string never has to be transcribed, and rotates it in one step.
+# `agent add <name>` does the same for an agent's credential: the name it is
+# added under is the name its messages carry and the only mailbox it can read.
+# An agent is a role - "the Claude in Rogue-Lite", "the Codex in Rogue-Lite",
+# "the GifterBoard bot" - wherever it runs; the description says which.
 
 import argparse
 import json
+import re
 import secrets
 import socket
 import sys
@@ -53,11 +58,15 @@ def lan_addresses() -> list[str]:
     return addrs
 
 
-def peer_instructions(cfg: Config, host: str | None = None, *,
-                      token: str | None = None, name: str = "<your-name>") -> str:
-    """The commands a peer runs, with the credential filled in. With `token`
-    and `name` these are for one named peer; without, for the admin token."""
-    candidates = [host] if host else (lan_addresses() or ["<this-host>"])
+def registration(cfg: Config, host: str | None = None, *, token: str | None = None,
+                 name: str = "<your-name>", local: bool = False) -> str:
+    """The commands that register this bridge, with the credential filled in.
+    With `token` and `name` these are for one agent; without, for the admin.
+    `local` is for an agent on this same machine: loopback, not the LAN."""
+    if local:
+        candidates = ["127.0.0.1"]
+    else:
+        candidates = [host] if host else (lan_addresses() or ["<this-host>"])
     addr = candidates[0]
     base = f"http://{addr}:{cfg.port}"
     t = token or cfg.token
@@ -65,12 +74,22 @@ def peer_instructions(cfg: Config, host: str | None = None, *,
     if len(candidates) > 1:
         others = (f"\n  (this machine also has {', '.join(candidates[1:])}; "
                   f"{addr} is the default-route address, which is usually the right one)")
-    whom = f"On '{name}'" if name != "<your-name>" else "On a peer"
+    whom = f"For '{name}'" if name != "<your-name>" else "For a caller"
+    env_var = re.sub(r"[^A-Z0-9]", "_", cfg.self_name.upper()) + "_BRIDGE_TOKEN"
     return "\n".join([
-        f"{whom}, register this bridge ('{cfg.self_name}') with Claude Code:{others}",
+        f"{whom}, register this bridge ('{cfg.self_name}'):{others}",
+        "",
+        "Claude Code - run it in the directory this agent works in. The default scope",
+        "('local') keeps the token in ~/.claude.json; never use --scope project, which",
+        "writes it into the repo's .mcp.json:",
         "",
         f"  claude mcp add --transport http {cfg.self_name} {base}/mcp \\",
         f"    --header \"Authorization: Bearer {t}\"",
+        "",
+        "Codex CLI - the token is read from an environment variable, never the command line:",
+        "",
+        f"  $env:{env_var} = \"{t}\"        # PowerShell; or: export {env_var}={t}",
+        f"  codex mcp add {cfg.self_name} --url {base}/mcp --bearer-token-env-var {env_var}",
         "",
         "Check reachability first (no token needed):",
         "",
@@ -100,48 +119,53 @@ def _save(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def cmd_peer(args) -> int:
+def cmd_agent(args) -> int:
     loaded = _load_data(args)
     if loaded is None:
         return 1
     path, data = loaded
-    peers = data["peers"] = data.get("peers") or {}      # tolerates "peers": null, as Config does
+    agents = data["agents"] = data.get("agents") or {}   # tolerates "agents": null, as Config does
     name = (args.name or "").strip().lower()
 
     if args.action == "list":
-        for n in sorted(peers):
-            print(n)
-        if not peers:
-            print("(no peers; every caller uses the admin token)", file=sys.stderr)
+        for n in sorted(agents):
+            print(f"{n:<20} {agents[n].get('description') or ''}".rstrip())
+        if not agents:
+            print("(no agents; every caller uses the admin token)", file=sys.stderr)
         return 0
     if not name:
-        print(f"'peer {args.action}' needs a name", file=sys.stderr)
+        print(f"'agent {args.action}' needs a name", file=sys.stderr)
         return 1
 
     if args.action == "remove":
-        if name not in peers:
-            print(f"no peer '{name}'", file=sys.stderr)
+        if name not in agents:
+            print(f"no agent '{name}'", file=sys.stderr)
             return 1
-        del peers[name]
+        del agents[name]
         _save(path, data)
         print(f"removed '{name}'. Restart the bridge; its token no longer works.")
         return 0
 
     if args.action == "add":
-        if name in peers and not args.rotate:
-            print(f"peer '{name}' exists. Use --rotate to replace its token, "
-                  f"or 'peer show {name}' to print it.", file=sys.stderr)
+        if name in agents and not args.rotate:
+            print(f"agent '{name}' exists. Use --rotate to replace its token, "
+                  f"or 'agent show {name}' to print it.", file=sys.stderr)
             return 1
-        peers[name] = {**peers.get(name, {}), "token": new_token()}
+        entry = {**agents.get(name, {}), "token": new_token()}
+        if args.description is not None:
+            entry["description"] = args.description
+        agents[name] = entry
         _save(path, data)
-        print(f"{'rotated' if args.rotate else 'added'} '{name}'. "
-              f"Restart the bridge, then on {name}:\n")
-    elif name not in peers:                             # show
-        print(f"no peer '{name}'", file=sys.stderr)
+        print(f"{'rotated' if args.rotate else 'added'} '{name}'. Restart the bridge, then:\n")
+    elif name not in agents:                            # show
+        print(f"no agent '{name}'", file=sys.stderr)
         return 1
 
     cfg = Config(data)
-    print(peer_instructions(cfg, token=cfg.peers[name]["token"], name=name))
+    spec = cfg.agents[name]
+    if spec.get("description"):
+        print(f"{name}: {spec['description']}\n")
+    print(registration(cfg, token=spec["token"], name=name, local=args.local))
     return 0
 
 
@@ -167,7 +191,7 @@ def cmd_init(args) -> int:
     print(f"  token:     {cfg.token}")
     print(f"  bind:      {cfg.host}:{cfg.port}   (exec disabled, no roots yet)")
     print()
-    print(peer_instructions(cfg))
+    print(registration(cfg))
     return 0
 
 
@@ -180,9 +204,9 @@ def cmd_token(args) -> int:
     if args.rotate:
         data["token"] = new_token()
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        print(f"rotated. Restart the bridge, then re-run 'claude mcp add' on every peer.\n")
+        print("rotated. Restart the bridge, then re-register wherever the admin token was used.\n")
     cfg = Config(data)
-    print(peer_instructions(cfg))
+    print(registration(cfg))
     return 0
 
 
@@ -213,21 +237,25 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--force", action="store_true", help="overwrite an existing config")
     i.set_defaults(fn=cmd_init)
 
-    t = sub.add_parser("token", help="print the peer-side commands for the admin token")
+    t = sub.add_parser("token", help="print the registration commands for the admin token")
     add_config(t)
     t.add_argument("--rotate", action="store_true", help="generate a new token first")
     t.set_defaults(fn=cmd_token)
 
-    pr = sub.add_parser("peer", help="manage per-peer credentials")
-    add_config(pr)
-    pr.add_argument("action", choices=["add", "show", "remove", "list"])
-    pr.add_argument("name", nargs="?", default="", help="the peer's name (its mailbox)")
-    pr.add_argument("--rotate", action="store_true", help="with add: replace an existing peer's token")
-    pr.set_defaults(fn=cmd_peer)
+    ag = sub.add_parser("agent", help="manage agent credentials (one per role)")
+    add_config(ag)
+    ag.add_argument("action", choices=["add", "show", "remove", "list"])
+    ag.add_argument("name", nargs="?", default="", help="the agent's name: its identity and its mailbox")
+    ag.add_argument("--description", default=None,
+                    help="one line on what is behind the name, e.g. 'Claude Code in D:/Git/Rogue-Lite'")
+    ag.add_argument("--rotate", action="store_true", help="with add: replace an existing agent's token")
+    ag.add_argument("--local", action="store_true",
+                    help="print loopback registration, for an agent on this machine")
+    ag.set_defaults(fn=cmd_agent)
 
     argv = sys.argv[1:] if argv is None else argv
     # No subcommand (the old spelling, and what bridge.ps1 runs) means serve.
-    if not any(a in ("serve", "init", "token", "peer", "-h", "--help") for a in argv):
+    if not any(a in ("serve", "init", "token", "agent", "-h", "--help") for a in argv):
         argv = ["serve", *argv]
     args = ap.parse_args(argv)
     return args.fn(args)

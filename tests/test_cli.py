@@ -56,18 +56,18 @@ def test_localhost_is_case_insensitive():
     refuse_open_bind("LOCALHOST", "")
 
 
-def test_a_peer_credential_counts_as_a_credential():
-    # S1: "no token and no peers" is the open condition, not "no token".
+def test_an_agent_credential_counts_as_a_credential():
+    # S1: "no token and no agents" is the open condition, not "no token".
     refuse_open_bind("0.0.0.0", "", {"sisyphus": {"token": "abc"}})
     refuse_open_bind("0.0.0.0", "CHANGE_ME", {"sisyphus": {"token": "abc"}})
     with pytest.raises(SystemExit, match="refusing to bind"):
         refuse_open_bind("0.0.0.0", "", {})
 
 
-def test_peer_instructions_drop_link_local_and_lead_with_the_route_address(monkeypatch):
+def test_agent_instructions_drop_link_local_and_lead_with_the_route_address(monkeypatch):
     from agent_bridge import cli
     monkeypatch.setattr(cli, "lan_addresses", lambda: ["192.168.1.10", "172.28.0.1"])
-    text = cli.peer_instructions(Config({"token": "abc", "self_name": "x"}))
+    text = cli.registration(Config({"token": "abc", "self_name": "x"}))
     assert "http://192.168.1.10:8791/mcp" in text
     assert "also has 172.28.0.1" in text
 
@@ -120,65 +120,102 @@ def test_token_without_a_config_points_at_init(tmp_path: Path, capsys):
     assert "agent-bridge init" in capsys.readouterr().err
 
 
-# --- peer -------------------------------------------------------------------------
+# --- agent -------------------------------------------------------------------------
 
-def test_peer_add_generates_a_credential_and_prints_its_commands(tmp_path: Path, capsys):
+def test_agent_add_generates_a_credential_and_prints_its_commands(tmp_path: Path, capsys):
     cfg = tmp_path / "config.json"
     main(["init", "--config", str(cfg), "--self-name", "fenrir"])
     capsys.readouterr()
-    assert main(["peer", "add", "Sisyphus", "--config", str(cfg)]) == 0
+    assert main(["agent", "add", "Sisyphus", "--config", str(cfg)]) == 0
     data = json.loads(cfg.read_text())
-    token = data["peers"]["sisyphus"]["token"]
+    token = data["agents"]["sisyphus"]["token"]
     assert HEX64.match(token) and token != data["token"]
     out = capsys.readouterr().out
-    assert token in out and "?agent=sisyphus" in out and "On 'sisyphus'" in out
-    assert data["token"] not in out                    # the admin token is not handed to a peer
+    assert token in out and "?agent=sisyphus" in out and "For 'sisyphus'" in out
+    assert data["token"] not in out                    # the admin token is not handed to an agent
+    # Both runtimes, and the token never on Codex's command line.
+    assert "claude mcp add" in out and "codex mcp add" in out
+    assert f"FENRIR_BRIDGE_TOKEN = \"{token}\"" in out and "--bearer-token-env-var FENRIR_BRIDGE_TOKEN" in out
 
 
-def test_peer_add_refuses_a_duplicate_unless_rotating(tmp_path: Path, capsys):
+def test_agent_add_keeps_a_description_and_local_prints_loopback(tmp_path: Path, capsys):
+    cfg = tmp_path / "config.json"
+    main(["init", "--config", str(cfg), "--self-name", "fenrir"])
+    capsys.readouterr()                                  # init prints the LAN address itself
+    assert main(["agent", "add", "rl-codex", "--description", "Codex CLI in D:/Git/Rogue-Lite",
+                 "--local", "--config", str(cfg)]) == 0
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:8791/mcp" in out and "192.168" not in out
+    assert "rl-codex: Codex CLI in D:/Git/Rogue-Lite" in out
+    assert json.loads(cfg.read_text())["agents"]["rl-codex"]["description"] == "Codex CLI in D:/Git/Rogue-Lite"
+    # Rotating keeps the description; list shows it.
+    main(["agent", "add", "rl-codex", "--rotate", "--config", str(cfg)])
+    assert json.loads(cfg.read_text())["agents"]["rl-codex"]["description"] == "Codex CLI in D:/Git/Rogue-Lite"
+    capsys.readouterr()
+    main(["agent", "list", "--config", str(cfg)])
+    assert "rl-codex" in capsys.readouterr().out.splitlines()[0]
+
+
+def test_the_old_peers_key_is_refused_with_a_pointer(tmp_path: Path):
+    with pytest.raises(SystemExit, match="'peers' is now 'agents'"):
+        Config({"peers": {"a": {"token": "abc"}}})
+
+
+def test_a_role_name_cannot_contain_the_instance_separator():
+    with pytest.raises(SystemExit, match="instance"):
+        Config({"agents": {"rl-claude#1": {"token": "abc"}}})
+
+
+def test_a_description_is_one_line_and_capped():
+    cfg = Config({"agents": {"a": {"token": "abc", "description": "  two\n lines " + "x" * 400}}})
+    d = cfg.agents["a"]["description"]
+    assert d.startswith("two lines x") and len(d) == 200
+
+
+def test_agent_add_refuses_a_duplicate_unless_rotating(tmp_path: Path, capsys):
     cfg = tmp_path / "config.json"
     main(["init", "--config", str(cfg)])
-    main(["peer", "add", "a", "--config", str(cfg)])
-    first = json.loads(cfg.read_text())["peers"]["a"]["token"]
-    assert main(["peer", "add", "a", "--config", str(cfg)]) == 1
+    main(["agent", "add", "a", "--config", str(cfg)])
+    first = json.loads(cfg.read_text())["agents"]["a"]["token"]
+    assert main(["agent", "add", "a", "--config", str(cfg)]) == 1
     assert "--rotate" in capsys.readouterr().err
-    assert main(["peer", "add", "a", "--rotate", "--config", str(cfg)]) == 0
-    assert json.loads(cfg.read_text())["peers"]["a"]["token"] != first
+    assert main(["agent", "add", "a", "--rotate", "--config", str(cfg)]) == 0
+    assert json.loads(cfg.read_text())["agents"]["a"]["token"] != first
 
 
-def test_peer_add_refuses_a_reserved_name_before_writing(tmp_path: Path):
+def test_agent_add_refuses_a_reserved_name_before_writing(tmp_path: Path):
     cfg = tmp_path / "config.json"
     main(["init", "--config", str(cfg), "--self-name", "fenrir"])
     before = cfg.read_text()
     with pytest.raises(SystemExit, match="reserved"):
-        main(["peer", "add", "fenrir", "--config", str(cfg)])
+        main(["agent", "add", "fenrir", "--config", str(cfg)])
     assert cfg.read_text() == before
 
 
-def test_peer_commands_tolerate_a_null_peers_key(tmp_path: Path, capsys):
+def test_agent_commands_tolerate_a_null_agents_key(tmp_path: Path, capsys):
     cfg = tmp_path / "config.json"
     main(["init", "--config", str(cfg)])
-    data = json.loads(cfg.read_text()); data["peers"] = None
+    data = json.loads(cfg.read_text()); data["agents"] = None
     cfg.write_text(json.dumps(data))
-    assert main(["peer", "list", "--config", str(cfg)]) == 0
-    assert main(["peer", "add", "a", "--config", str(cfg)]) == 0
-    assert list(json.loads(cfg.read_text())["peers"]) == ["a"]
+    assert main(["agent", "list", "--config", str(cfg)]) == 0
+    assert main(["agent", "add", "a", "--config", str(cfg)]) == 0
+    assert list(json.loads(cfg.read_text())["agents"]) == ["a"]
 
 
-def test_peer_show_list_remove(tmp_path: Path, capsys):
+def test_agent_show_list_remove(tmp_path: Path, capsys):
     cfg = tmp_path / "config.json"
     main(["init", "--config", str(cfg)])
-    main(["peer", "add", "b", "--config", str(cfg)])
-    main(["peer", "add", "a", "--config", str(cfg)])
+    main(["agent", "add", "b", "--config", str(cfg)])
+    main(["agent", "add", "a", "--config", str(cfg)])
     capsys.readouterr()
-    assert main(["peer", "list", "--config", str(cfg)]) == 0
+    assert main(["agent", "list", "--config", str(cfg)]) == 0
     assert capsys.readouterr().out.split() == ["a", "b"]
-    assert main(["peer", "show", "a", "--config", str(cfg)]) == 0
-    assert json.loads(cfg.read_text())["peers"]["a"]["token"] in capsys.readouterr().out
-    assert main(["peer", "remove", "a", "--config", str(cfg)]) == 0
-    assert list(json.loads(cfg.read_text())["peers"]) == ["b"]
-    assert main(["peer", "remove", "a", "--config", str(cfg)]) == 1
-    assert main(["peer", "show", "--config", str(cfg)]) == 1    # needs a name
+    assert main(["agent", "show", "a", "--config", str(cfg)]) == 0
+    assert json.loads(cfg.read_text())["agents"]["a"]["token"] in capsys.readouterr().out
+    assert main(["agent", "remove", "a", "--config", str(cfg)]) == 0
+    assert list(json.loads(cfg.read_text())["agents"]) == ["b"]
+    assert main(["agent", "remove", "a", "--config", str(cfg)]) == 1
+    assert main(["agent", "show", "--config", str(cfg)]) == 1    # needs a name
 
 
 def test_no_subcommand_means_serve(monkeypatch):

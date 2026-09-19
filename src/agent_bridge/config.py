@@ -21,7 +21,7 @@ DEFAULTS = {
     "host": "0.0.0.0",
     "port": 8791,
     "token": "",
-    "peers": {},
+    "agents": {},
     "roots": {},
     "allowed_hosts": [],
     "max_read_bytes": 256 * 1024,
@@ -54,7 +54,9 @@ class Config:
                 "string is fine)."
             )
 
-        self.peers = _peers(merged.get("peers") or {}, merged["self_name"], merged["token"])
+        if "peers" in data:
+            raise SystemExit("'peers' is now 'agents' in config.json (same shape: name -> {\"token\": ...})")
+        self.agents = _agents(merged.get("agents") or {}, merged["self_name"], merged["token"])
 
         # Roots are resolved once, at load. Every later path check compares
         # against these resolved absolutes, so a symlink or a "..\" in a request
@@ -92,35 +94,47 @@ class Config:
         return cls(json.loads(p.read_text(encoding="utf-8")))
 
 
-# Each peer is {"token": "..."} and may carry more later (S3 adds scopes).
-# Names are normalised the way the mailbox normalises them, because the name
-# IS the mailbox once identity comes from the credential. Refused outright:
-# a blank or placeholder token, a token that is not a subprotocol string, a
-# peer named after this machine or "*", and any two credentials that match -
-# a shared token would make the first name in file order the winner, silently.
-def _peers(raw: dict, self_name: str, admin_token: str) -> dict[str, dict]:
-    from agent_bridge.auth import PLACEHOLDER_TOKENS, WILDCARD
+# One line: enough for another agent to pick who to ask, small enough that a
+# directory of many agents stays a few hundred tokens in its context.
+DESCRIPTION_MAX = 200
+
+
+# Each agent is {"token": "...", "description": "..."} and may carry more later
+# (S3 adds scopes). Names are normalised the way the mailbox normalises them,
+# because the name IS the mailbox once identity comes from the credential.
+# Refused outright: a blank or placeholder token, a token that is not a
+# subprotocol string, an agent named after this machine or "*", a name with
+# the instance separator in it, and any two credentials that match - a shared
+# token would make the first name in file order the winner, silently.
+def _agents(raw: dict, self_name: str, admin_token: str) -> dict[str, dict]:
+    from agent_bridge.auth import INSTANCE_SEP, PLACEHOLDER_TOKENS, WILDCARD
 
     if not isinstance(raw, dict):
-        raise SystemExit("peers must be a map of name -> {\"token\": ...}")
-    peers: dict[str, dict] = {}
+        raise SystemExit("agents must be a map of name -> {\"token\": ...}")
+    agents: dict[str, dict] = {}
     seen = {admin_token} if admin_token not in PLACEHOLDER_TOKENS else set()
     for name, spec in raw.items():
         key = str(name).strip().lower()
         if not key or key in (WILDCARD, str(self_name).strip().lower()):
-            raise SystemExit(f"peer name {name!r} is reserved (this machine is '{self_name}')")
+            raise SystemExit(f"agent name {name!r} is reserved (this machine is '{self_name}')")
+        if INSTANCE_SEP in key:
+            raise SystemExit(f"agent name {name!r}: '{INSTANCE_SEP}' separates a role from an instance and cannot be in a role name")
         token = (spec or {}).get("token") if isinstance(spec, dict) else None
         if not isinstance(token, str) or token in PLACEHOLDER_TOKENS:
-            raise SystemExit(f"peer '{key}' needs a real token: run 'agent-bridge peer add {key}'")
+            raise SystemExit(f"agent '{key}' needs a real token: run 'agent-bridge agent add {key}'")
         if not TOKEN_CHARS.match(token):
-            raise SystemExit(f"peer '{key}' has a token the WebSocket subprotocol grammar cannot carry")
+            raise SystemExit(f"agent '{key}' has a token the WebSocket subprotocol grammar cannot carry")
         if token in seen:
-            raise SystemExit(f"peer '{key}' shares its token with another credential; each must be unique")
-        if key in peers:
-            raise SystemExit(f"peer '{key}' is listed twice")
+            raise SystemExit(f"agent '{key}' shares its token with another credential; each must be unique")
+        if key in agents:
+            raise SystemExit(f"agent '{key}' is listed twice")
+        description = spec.get("description") or ""
+        if not isinstance(description, str):
+            raise SystemExit(f"agent '{key}': description must be a string")
         seen.add(token)
-        peers[key] = {**spec, "token": token}
-    return peers
+        agents[key] = {**spec, "token": token,
+                       "description": " ".join(description.split())[:DESCRIPTION_MAX]}
+    return agents
 
 
 def default_config_path() -> Path:

@@ -2,7 +2,7 @@
 #  agent-bridge-mcp - Copyright(c) 2026
 #
 
-# A message store shared by every peer, plus a live fan-out so a message does
+# A message store shared by every agent, plus a live fan-out so a message does
 # not have to be polled for.
 #
 # The polling half and the push half are NOT alternatives. An agent that is
@@ -151,7 +151,7 @@ class Mailbox:
         sender = (sender or "unknown").strip().lower()
         to = (to or "").strip().lower()
         if not to:
-            raise ValueError("'to' is required - name the peer this is for")
+            raise ValueError("'to' is required - name the agent this is for")
         if not text.strip():
             raise ValueError("'text' is empty")
         size = _size(text)
@@ -223,7 +223,10 @@ class Mailbox:
         agent = (agent or "").strip().lower()
         return sum(1 for m in self._messages if m.to == agent and not m.read)
 
-    def peers(self) -> list[dict]:
+    # Every name that has appeared in traffic or listened, with what waits
+    # for it. Activity, not configuration: server.py merges this with the
+    # configured agents into the directory bridge_agents returns.
+    def mailboxes(self) -> list[dict]:
         now = time.time()
         names = set(self._seen) | {m.sender for m in self._messages} | {m.to for m in self._messages}
         return sorted(
