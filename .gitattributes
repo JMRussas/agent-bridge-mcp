@@ -3,7 +3,7 @@
 # Without this file every commit warned "LF will be replaced by CRLF", because
 # autocrlf=true was converting on checkout while tooling wrote LF. Declaring the
 # policy in the repo makes it consistent for everyone and silences the churn.
-# Same policy as the Rogue-Lite repo this bridge serves.
+# One policy for every file, so a checkout looks the same on every machine.
 
 # Normalise all text to LF in the repository and in the working tree.
 * text=auto eol=lf

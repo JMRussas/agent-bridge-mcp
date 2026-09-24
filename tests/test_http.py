@@ -27,7 +27,6 @@ def client(tmp_path: Path):
         "token": TOKEN,
         "roots": {"proj": str(root)},
         "mailbox_store": "",
-        "output_dir": str(tmp_path / "out"),
         "allowed_hosts": ["testserver:*", "localhost:*"],
     })
     with TestClient(build(cfg)) as c:

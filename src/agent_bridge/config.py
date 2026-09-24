@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import socket
 from pathlib import Path
 
 # RFC 6455 subprotocol names are HTTP tokens. The WebSocket carries the bearer
@@ -17,7 +18,8 @@ from pathlib import Path
 TOKEN_CHARS = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]*$")
 
 DEFAULTS = {
-    "self_name": "fenrir",
+    "self_name": "",                 # empty: this machine's hostname
+    "description": "",               # one line on what this bridge is for; goes in the MCP instructions
     "host": "0.0.0.0",
     "port": 8791,
     "token": "",
@@ -31,17 +33,25 @@ DEFAULTS = {
     "max_message_bytes": 64 * 1024,
     "mailbox_store": "mailbox.json",
     "mailbox_debounce_s": 0.25,
-    "output_dir": "out",
     "exec": {"enabled": False, "timeout": 300, "commands": {}},
-    "gifterboard": {"url": "", "creator": "", "token": "", "avatar_size": 64},
+    # Named log files served by logs_list / logs_read. No names, no tools.
+    # exe_names are the executables whose timestamp dates a log; skip_dirs
+    # extends the built-in list of directories not worth walking.
+    "logs": {"names": [], "exe_names": [], "skip_dirs": []},
 }
 
 
 class Config:
     def __init__(self, data: dict):
         merged = {**DEFAULTS, **data}
-        merged["exec"] = {**DEFAULTS["exec"], **data.get("exec", {})}
-        merged["gifterboard"] = {**DEFAULTS["gifterboard"], **data.get("gifterboard", {})}
+        merged["exec"] = {**DEFAULTS["exec"], **(data.get("exec") or {})}
+        merged["logs"] = _logs({**DEFAULTS["logs"], **(data.get("logs") or {})})
+        for old in ("gifterboard", "output_dir"):
+            if old in data:
+                raise SystemExit(f"'{old}' left config.json with the avatar tools; remove it "
+                                 "(docs/examples/ has the old setup)")
+        merged["self_name"] = (merged.get("self_name") or socket.gethostname()).strip().lower()
+        merged["description"] = " ".join(str(merged.get("description") or "").split())
         # A null token is no token. Left as None it would slip past every
         # "is this a placeholder" check while authorised() treated it as open.
         merged["token"] = merged.get("token") or ""
@@ -92,6 +102,20 @@ class Config:
                 "Run 'agent-bridge init' to write one with a generated token."
             )
         return cls(json.loads(p.read_text(encoding="utf-8")))
+
+
+# Each of the three lists must be a list of non-empty strings; a name with a
+# path separator in it is a path, not a filename, and would silently never match.
+def _logs(raw: dict) -> dict:
+    out = {}
+    for key in ("names", "exe_names", "skip_dirs"):
+        val = raw.get(key) or []
+        if not isinstance(val, list) or not all(isinstance(v, str) and v.strip() for v in val):
+            raise SystemExit(f"logs.{key} must be a list of filenames")
+        if any("/" in v or "\\" in v for v in val):
+            raise SystemExit(f"logs.{key} takes filenames, not paths: {val}")
+        out[key] = [v.strip() for v in val]
+    return out
 
 
 # One line: enough for another agent to pick who to ask, small enough that a

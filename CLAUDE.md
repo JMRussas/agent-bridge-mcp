@@ -1,13 +1,14 @@
 # agent-bridge-mcp
 
-An MCP server that lets a Claude agent on another machine talk to the agent on
-this one, read the source trees this one works in, and probe the viewer-avatar
-decode path that spans both.
+A communication bridge for agents and models: a durable mailbox with live
+push, a directory of who is reachable, identity that comes from a credential
+rather than a claim, and, on a machine whose source must be exposed, scoped
+read and allowlisted exec over the trees it is given.
 
-Built for the FENRIR <-> SISYPHUS split: the Rogue-Lite game client and the
-Sluzzygames server *source* live on FENRIR, while the GifterBoard server and its
-ffmpeg actually *run* on SISYPHUS. The avatar contract spans that gap and
-nothing checks it, which is what this bridge exists to fix.
+Nothing in `src/` is specific to any project. Roots, commands and log names
+come from `config.json`; the two-machine game setup this was first built for
+survives only as a worked example in [docs/examples/](docs/examples/).
+[docs/ROADMAP.md](docs/ROADMAP.md) is the plan.
 
 ## Quick Reference
 
@@ -15,7 +16,7 @@ nothing checks it, which is what this bridge exists to fix.
 |------|---------|
 | First run | `.venv\Scripts\agent-bridge init` (writes `config.json`, generates the admin token, prints its registration commands) |
 | Show / rotate the admin token | `.venv\Scripts\agent-bridge token` / `token --rotate` |
-| Give an agent its credential | `.venv\Scripts\agent-bridge agent add rl-claude --description "Claude Code in D:/Git/Rogue-Lite" [--local]` (prints its registration for Claude Code and Codex) |
+| Give an agent its credential | `.venv\Scripts\agent-bridge agent add agent-a --description "Claude Code in /path/to/repo-a" [--local]` (prints its registration for Claude Code and Codex) |
 | List / show / remove agents | `agent-bridge agent list` / `agent show <name>` / `agent remove <name>` |
 | Start | `tools\bridge.ps1 start` |
 | Status | `tools\bridge.ps1 status` |
@@ -36,9 +37,13 @@ src/agent_bridge/
   mailbox.py    durable message store + live fan-out
   files.py      scoped read/list/grep over the configured roots
   execute.py    allowlisted command runner
-  avatar.py     the decode probes and a dependency-free PNG encoder
+  logs.py       named log files under the roots, dated against the build beside them
+  patterns.py   caller-supplied regexes, with a deadline
   config.py     config.json loader
+  cli.py        init / token / agent / serve
 tools/bridge.ps1  start/stop/status/firewall
+docs/diagrams/    deployment, class and sequence diagrams (SVG); embedded in README
+docs/examples/    the setup this was first built for, as a worked example
 config.json       machine-specific, gitignored — holds the token
 ```
 
@@ -61,8 +66,8 @@ unable to answer a message until the next session. `curl` always works.
 Four words, used precisely; [docs/identity.md](docs/identity.md) has the
 reasoning and the alternatives that were rejected.
 
-- **agent** — a *name* in the mailbox. A role: "the Claude in Rogue-Lite",
-  "the Codex in Rogue-Lite", "the GifterBoard bot". Anything can be behind it
+- **agent** — a *name* in the mailbox. A role: "the Claude in repo-a",
+  "the Codex in repo-a", "the review bot". Anything can be behind it
   and the bridge neither knows nor cares. Not a machine, not a conversation.
 - **credential** — proves an agent name. One per role, issued by the operator
   with `agent add`. It is the *only* source of identity: the sender of a
@@ -70,23 +75,23 @@ reasoning and the alternatives that were rejected.
   request body.
 - **admin** — this bridge's own credential (the single `token`). Its name is
   `self_name` and it may act as anyone. For the operator — scripts, local
-  `curl` — **never for an agent**: an agent on the admin token sends as
-  `fenrir`, reads every mailbox, and the whole boundary evaporates.
+  `curl` — **never for an agent**: an agent on the admin token sends as the
+  bridge itself, reads every mailbox, and the whole boundary evaporates.
 - **peer** — prose only: a remote machine. Not a thing in the code.
 
-An **instance** (`rl-claude#3f2a`) is one session of a role — the addressing is
+An **instance** (`agent-a#3f2a`) is one session of a role — the addressing is
 reserved now, delivered in S1b. Instances share their role's credential and
 trust; if two things must not read each other's mail, they are two roles.
 
 ## Connecting an agent
 
-On FENRIR, give the agent a credential — a role name and one line on what it
-is — and paste what it prints where that agent runs:
+On the machine running the bridge, give the agent a credential — a role name
+and one line on what it is — and paste what it prints where that agent runs:
 
 ```powershell
-.venv\Scripts\agent-bridge agent add sisyphus --description "Claude Code on SISYPHUS, runs GifterBoard"
-.venv\Scripts\agent-bridge agent add rl-claude --description "Claude Code in D:/Git/Rogue-Lite" --local
-.venv\Scripts\agent-bridge agent add rl-codex  --description "Codex CLI in D:/Git/Rogue-Lite" --local
+.venv\Scripts\agent-bridge agent add remote-agent --description "Claude Code on the other box"
+.venv\Scripts\agent-bridge agent add agent-a      --description "Claude Code in /path/to/repo-a" --local
+.venv\Scripts\agent-bridge agent add agent-b      --description "Codex CLI in /path/to/repo-a" --local
 ```
 
 Each prints a `claude mcp add` line (run it *in the directory that agent works
@@ -95,7 +100,7 @@ in*; the default `local` scope keeps the token in `~/.claude.json` — never
 (the token goes in an environment variable, never on the command line).
 `--local` prints loopback instead of the LAN address.
 
-A request with `rl-claude`'s token *is* `rl-claude`: its messages carry that
+A request with `agent-a`'s token *is* `agent-a`: its messages carry that
 sender whatever the body says, and `bridge_inbox`, `bridge_wait` and `/notify`
 default to — and are confined to — its own mailbox. Two agents in the same
 repo on the same box are two credentials; a reply to one is invisible to the
@@ -106,11 +111,11 @@ Check it first without Claude Code — `/api/health` needs no token and is the
 fastest way to tell "firewall" apart from "wrong token":
 
 ```powershell
-curl http://192.168.1.174:8791/api/health
+curl http://<bridge-host>:8791/api/health
 ```
 
-**ICMP is blocked on both boxes**, so `ping sisyphus` times out on a machine
-that is perfectly reachable. Test with SMB or the health endpoint, never ping.
+**Host firewalls often block ICMP**, so `ping` can time out against a machine
+that is perfectly reachable. Test with the health endpoint, never ping.
 
 ## Receiving messages without polling
 
@@ -118,9 +123,9 @@ The point of `/notify` is that a message *arrives* rather than being asked for.
 In Claude Code, the `Monitor` tool consumes it directly:
 
 ```
-Monitor(ws: {url: "ws://127.0.0.1:8791/notify?agent=fenrir",
+Monitor(ws: {url: "ws://127.0.0.1:8791/notify?agent=<your-name>",
              protocols: ["bridge", "bearer.<token>"]},
-        description: "bridge mail for fenrir", timeout_ms: 1800000)
+        description: "bridge mail", timeout_ms: 1800000)
 ```
 
 Each text frame becomes one notification in the session. Two consequences shaped
@@ -147,32 +152,21 @@ the implementation:
 | `bridge_send` / `bridge_inbox` / `bridge_history` | the mailbox |
 | `bridge_list` / `bridge_read` / `bridge_grep` | read-only source access |
 | `bridge_commands` / `bridge_run` | allowlisted execution |
-| `avatar_contract` / `avatar_probe` / `avatar_png` | the decode path |
+| `logs_list` / `logs_read` | named log files; registered only when `logs.names` is set |
 
-Files are addressed as `root:relative/path`, e.g.
-`rogue-lite:game/live/ViewerRegistry.cs`.
+Files are addressed as `root:relative/path`, e.g. `repo-a:src/main.py`.
 
-## The avatar contract, and why these tools exist
+## Logs are a separate surface, and why
 
-`avatar_contract` reads `AvatarSize` out of `ViewerRegistry.cs` and
-`AVATAR_SIZE` out of `game-feed.js` and reports whether they still agree. It
-reads both rather than asserting a remembered number, because the whole failure
-mode is the two drifting apart.
-
-The reason a drift is worth tooling: **it is silent on both sides.**
-
-- `decodeToRgba()` resolves `null` whenever ffmpeg returns anything other than
-  exactly `size*size*4` bytes.
-- `ViewerRegistry.BeginDownload` discards the response unless it is exactly
-  `AvatarBytes`, and swallows every exception, because "this viewer has no
-  picture" is a normal outcome.
-
-So a mismatch does not raise, log, or fail a test. It renders a plain monster —
-indistinguishable from a viewer who genuinely has no avatar. `avatar_probe`
-turns that into a sentence: it reports the received length against the required
-length, sniffs what the body actually is when it is wrong (an undecoded JPEG
-reads very differently from a JSON error), and checks for all-transparent or
-all-black pixels when the length is right but the picture is still missing.
+`logs.names` in `config.json` lists log *filenames* (`app.log`, `diag.log`).
+`logs_list` finds them under every root, including inside `bin/` and `dist/`
+where `bridge_read` refuses to go, because reading a log is not trawling build
+output. `logs.exe_names` lists the executables that write them; with those
+set, every listing dates each log against the executable beside it and flags
+build folders that lack one. That flag is the point: a binary built before the
+code that writes the log produces none, and "no log" then reads as "the
+subsystem never ran" when it means "old binary". With no `logs.names`, the two
+tools are not registered at all.
 
 ## Security posture
 
@@ -184,7 +178,7 @@ not a wrapper around it:
    string first and resolving after would pass both `..\..\Windows` and a
    junction pointing out of the tree.
 2. **The exec allowlist is keyed by name, not by prefix.** A remote agent asks
-   for `viewers`; it never composes a command line. Prefix matching is the
+   for `build`; it never composes a command line. Prefix matching is the
    version of this that looks equivalent and is not — allowing `git log` as a
    prefix also allows `git log; rm -rf`.
 3. **Nothing runs through a shell.** `argv` lists, `shell=False`. Extra
@@ -198,10 +192,11 @@ not a wrapper around it:
    private-profile LAN interface.
 5. `.env`, `config.json` and credentials files are on a deny list, and
    `node_modules`/`.git`/`bin`/`obj` are skipped by list, grep and read.
-6. **The one tool that writes (`avatar_png`) is confined to `output_dir`**
-   (default `out/` beside `config.json`) and to `.png` names. It used to take
-   an arbitrary absolute path, which made a read-only bridge able to overwrite
-   any file the server's user could.
+6. **No tool writes to disk.** The mailbox store is the only file the bridge
+   touches. The one writing tool this ever had took an arbitrary path once,
+   which made a read-only bridge able to overwrite any file the server's user
+   could; a future tool that must write gets one configured directory and a
+   suffix allowlist, nothing more.
 
 7. **Identity comes from the credential, never from the request body.**
    `auth.Credentials` resolves a bearer token to a `Principal`: an agent's
@@ -233,8 +228,8 @@ all** (no usable admin token *and* no agents) — a copied example cannot go
 live open by accident.
 
 The threat that matters most here is not the network; it is **prompt
-injection through the content the bridge carries** — messages, and the game
-logs that contain viewer chat from the internet. [docs/threat-model.md](docs/threat-model.md)
+injection through the content the bridge carries** — messages, source files,
+and logs that may hold text typed by strangers. [docs/threat-model.md](docs/threat-model.md)
 ranks the vectors and the controls, in the order they are being built.
 
 ## Gotchas
@@ -258,8 +253,8 @@ ranks the vectors and the controls, in the order they are being built.
 
   **A peer does not go in this list.** `allowed_hosts` is matched against the
   `Host` header, which is the address the caller *dialled* — this machine —
-  not the caller's own name. SISYPHUS asking for `http://192.168.1.174:8791`
-  sends `Host: 192.168.1.174:8791`; the name "sisyphus" never appears. What
+  not the caller's own name. A peer asking for `http://10.0.0.5:8791`
+  sends `Host: 10.0.0.5:8791`; the peer's own name never appears. What
   authorises a peer is the bearer token. `/api/health` reports `host_seen`,
   `host_allowed` and `your_address` so a peer can settle this from its own
   side in one unauthenticated request.

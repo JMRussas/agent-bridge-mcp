@@ -11,8 +11,8 @@
 # so the string never has to be transcribed, and rotates it in one step.
 # `agent add <name>` does the same for an agent's credential: the name it is
 # added under is the name its messages carry and the only mailbox it can read.
-# An agent is a role - "the Claude in Rogue-Lite", "the Codex in Rogue-Lite",
-# "the GifterBoard bot" - wherever it runs; the description says which.
+# An agent is a role - "the Claude in repo-a", "the Codex in repo-a", "the
+# review bot" - wherever it runs; the description says which.
 
 import argparse
 import json
@@ -181,8 +181,10 @@ def cmd_init(args) -> int:
     data["token"] = new_token()
     data["roots"] = {}
     data["exec"]["enabled"] = False
+    data["//description"] = "One line on what this bridge is for; peers see it in the MCP instructions."
     data["//roots"] = "name -> absolute path. Files are addressed as 'name:relative/path'."
     data["//exec"] = "Off until you add commands. Each entry is an argv list, keyed by name."
+    data["//logs"] = "Log FILENAMES served by logs_list/logs_read (found under any root, even inside bin/). Empty means no log tools."
 
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     cfg = Config(data)
@@ -247,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     ag.add_argument("action", choices=["add", "show", "remove", "list"])
     ag.add_argument("name", nargs="?", default="", help="the agent's name: its identity and its mailbox")
     ag.add_argument("--description", default=None,
-                    help="one line on what is behind the name, e.g. 'Claude Code in D:/Git/Rogue-Lite'")
+                    help="one line on what is behind the name, e.g. 'Claude Code in /path/to/repo-a'")
     ag.add_argument("--rotate", action="store_true", help="with add: replace an existing agent's token")
     ag.add_argument("--local", action="store_true",
                     help="print loopback registration, for an agent on this machine")

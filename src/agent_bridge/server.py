@@ -42,7 +42,6 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from agent_bridge.auth import PLACEHOLDER_TOKENS, Credentials, Forbidden, Principal
-from agent_bridge.avatar import Avatars, OutputDenied
 from agent_bridge.config import Config
 from agent_bridge.execute import ExecDenied, Runner
 from agent_bridge.files import Files, PathDenied
@@ -121,9 +120,47 @@ def _host_ok(host: str, allowed: list[str]) -> bool:
     return any(host.startswith(a[:-1]) for a in allowed if a.endswith(":*"))
 
 
+# The MCP `instructions` string, built from the config rather than written for
+# one machine: a peer should learn what THIS bridge exposes, and a config that
+# names no roots, logs or commands should produce a string that names none.
+def _instructions(cfg: Config, logs: Logs) -> str:
+    about = f"This is the agent-bridge on '{cfg.self_name}'"
+    if cfg.description:
+        about += f": {cfg.description}"
+    parts = [
+        about + ".",
+        "CALL bridge_capabilities() FIRST. It lists every tool, the live WebSocket "
+        "subscription that removes the need to poll, the REST fallback, and the "
+        "hazards that have caused false diagnoses before.",
+        "Use bridge_send to ask an agent here a question; it is delivered live and "
+        "also persisted to disk, so it survives that agent being mid-turn AND this "
+        "server restarting. Use bridge_wait or bridge_inbox for replies, or subscribe "
+        "to /notify and be told instead. bridge_agents is the directory of who is "
+        "reachable.",
+    ]
+    if cfg.roots:
+        parts.append(
+            f"Source trees readable here: {', '.join(sorted(cfg.roots))}. Most questions "
+            "about them need no other agent: bridge_read and bridge_grep answer them, "
+            "and bridge_list shows what is there."
+        )
+    if logs.enabled:
+        parts.append(
+            f"Log files served by logs_list and logs_read: {', '.join(logs.names)}. "
+            "Each result says how the log compares to the build beside it; read that "
+            "before drawing a conclusion from an absent or old log."
+        )
+    if cfg.exec_enabled and cfg.commands:
+        parts.append(
+            f"Allowlisted commands (bridge_commands, bridge_run): "
+            f"{', '.join(sorted(cfg.commands))}."
+        )
+    return "\n\n".join(parts)
+
+
 def build(cfg: Config):
-    # A relative store or output directory sits beside config.json, not beside
-    # whatever directory the service happened to be started from.
+    # A relative store sits beside config.json, not beside whatever directory
+    # the service happened to be started from.
     def beside_config(p: str) -> Path | None:
         if not p:
             return None
@@ -135,8 +172,8 @@ def build(cfg: Config):
                   debounce_s=float(cfg.mailbox_debounce_s))
     files = Files(cfg.roots, int(cfg.max_read_bytes), ripgrep=cfg.ripgrep_path)
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
-    avatars = Avatars(cfg.gifterboard, cfg.roots, output_dir=beside_config(cfg.output_dir))
-    logs = Logs(cfg.roots)
+    logs = Logs(cfg.roots, names=cfg.logs["names"], exe_names=cfg.logs["exe_names"],
+                skip_dirs=cfg.logs["skip_dirs"])
     creds = Credentials(cfg.self_name, cfg.token, cfg.agents)
 
     hosts = allowed_hosts(cfg)
@@ -150,21 +187,7 @@ def build(cfg: Config):
             # a block on legitimate clients.
             allowed_origins=[],
         ),
-        instructions=(
-            f"You are talking to the machine '{cfg.self_name}', where the Rogue-Lite game "
-            f"client and the Sluzzygames server source both live.\n\n"
-            f"CALL bridge_capabilities() FIRST. It lists every tool, the live WebSocket "
-            f"subscription that removes the need to poll, the REST fallback, and the "
-            f"hazards that have already caused false diagnoses here.\n\n"
-            f"Use bridge_send to ask the agent here a question; it is delivered live and "
-            f"also persisted to disk, so it survives that agent being mid-turn AND this "
-            f"server restarting. Poll bridge_inbox for replies, or subscribe to /notify "
-            f"and be told instead.\n\n"
-            f"Most questions do not need a human or another agent: bridge_read and "
-            f"bridge_grep expose both source trees, logs_read serves the game's engine.log "
-            f"(with staleness warnings), and avatar_contract/avatar_probe answer 'do the "
-            f"two sides still agree on the byte count' without anyone reading code."
-        ),
+        instructions=_instructions(cfg, logs),
     )
 
     # --- identity ----------------------------------------------------------
@@ -224,7 +247,6 @@ def build(cfg: Config):
             "roots": {k: str(v) for k, v in cfg.roots.items()},
             "exec_enabled": cfg.exec_enabled,
             "commands": sorted(cfg.commands),
-            "gifterboard_url": avatars.url or "(unset)",
             "grep_engine": files.engine(),
             "agents": directory(),
         }
@@ -336,7 +358,6 @@ def build(cfg: Config):
                                                  "bridge_list", "bridge_roots")
                      else "execution" if t.name in ("bridge_run", "bridge_commands")
                      else "logs" if t.name.startswith("logs_")
-                     else "avatar" if t.name.startswith("avatar_")
                      else "other")
             groups.setdefault(group, []).append({
                 "name": t.name,
@@ -390,10 +411,11 @@ def build(cfg: Config):
                 "messages through this bridge (\\a and \\t eaten as escapes), which "
                 "caused a real false diagnosis. Send paths with forward slashes, or "
                 "JSON-escape them. Never trust a pasted Windows path here.",
-                "STALE BUILDS: an absent engine.log usually means the binary predates "
-                "Log.Path, not that a subsystem is silent. logs_list reports "
-                "builds_without_engine_log and compares each log to the exe beside "
-                "it - read those fields before concluding anything from an absence.",
+                *(["STALE LOGS: an absent log usually means the binary predates the "
+                   "code that writes it, not that a subsystem is silent. logs_list "
+                   "reports builds_with_missing_logs and compares each log to the exe "
+                   "beside it - read those fields before concluding anything from an "
+                   "absence."] if logs.enabled else []),
                 ("YOU ARE THE ADMIN: this credential may read any mailbox and send "
                  "under any name. Agents with their own credentials cannot."
                  if me.admin else
@@ -409,9 +431,9 @@ def build(cfg: Config):
     @mcp.tool()
     def bridge_roots() -> dict:
         """The source trees readable through this bridge."""
+        example = next(iter(sorted(cfg.roots)), "root")
         return {"roots": {k: str(v) for k, v in cfg.roots.items()},
-                "usage": "Address files as 'root:relative/path', e.g. "
-                         "'rogue-lite:game/live/ViewerRegistry.cs'."}
+                "usage": f"Address files as 'root:relative/path', e.g. '{example}:src/main.py'."}
 
     # The SDK calls a plain-function tool inline on the event loop, so every
     # tool below that touches the disk runs its body in a worker thread. Left
@@ -459,69 +481,33 @@ def build(cfg: Config):
         except ExecDenied as e:
             return {"error": str(e)}
 
-    # --- game logs ----------------------------------------------------------
+    # --- named log files (only when the config names some) ------------------
 
-    @mcp.tool()
-    async def logs_list() -> dict:
-        """Every engine.log / diag.log on this machine, newest first.
+    if logs.enabled:
+        @mcp.tool()
+        async def logs_list() -> dict:
+            """Every configured log file under the roots, newest first.
 
-        Also lists builds that have NO engine.log, because that absence is the
-        trap: a binary published before Log.Path was set never writes one, so
-        "no log" means old binary, not "the subsystem never ran".
-        """
-        return await anyio.to_thread.run_sync(logs.list)
+            Also lists builds that LACK a configured log, because that absence
+            is the trap: a binary built before the code that writes the log
+            never produces one, so "no log" means old binary or never ran, not
+            "the subsystem is silent".
+            """
+            return await anyio.to_thread.run_sync(logs.list)
 
-    @mcp.tool()
-    async def logs_read(target: str = "", lines: int = 200, contains: str = "",
-                        level: str = "") -> dict:
-        """Read a game log, newest lines last. Defaults to the most recent one.
+        @mcp.tool()
+        async def logs_read(target: str = "", lines: int = 200, contains: str = "",
+                            level: str = "") -> dict:
+            """Read a configured log, newest lines last. Defaults to the most recent.
 
-        `contains` is a regex filter, `level` keeps one of INFO/WARNING/ERROR.
-        Every result carries the log's age and how it compares to the executable
-        beside it, so a stale file cannot be read as current.
-        """
-        try:
-            return await anyio.to_thread.run_sync(logs.read, target, lines, contains, level)
-        except ValueError as e:
-            return {"error": str(e)}
-
-    # --- avatar / decode probes --------------------------------------------
-
-    @mcp.tool()
-    async def avatar_contract() -> dict:
-        """Compare the avatar byte contract as written on BOTH sides.
-
-        Reads AvatarSize from ViewerRegistry.cs and AVATAR_SIZE from game-feed.js
-        and reports whether they still agree. A disagreement is silent at runtime.
-        """
-        return await anyio.to_thread.run_sync(avatars.expectations)
-
-    @mcp.tool()
-    async def avatar_probe(uid: str, size: int = 0, creator: str = "") -> dict:
-        """Fetch one viewer's avatar from the running server and judge the bytes.
-
-        Reports the received length against the length the game requires, what
-        the body actually looks like if it is wrong, and whether the pixels are
-        blank or transparent if it is right.
-        """
-        try:
-            return await avatars.probe(uid, size, creator)
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
-
-    @mcp.tool()
-    async def avatar_png(uid: str, out_path: str, size: int = 0, creator: str = "") -> dict:
-        """Write a viewer's decoded avatar to a PNG so it can be looked at.
-
-        `out_path` is relative to this bridge's output directory and must end
-        in .png; nothing outside that directory is ever written.
-        """
-        try:
-            return await avatars.to_png(uid, out_path, size, creator)
-        except OutputDenied as e:
-            return {"error": str(e), "output_dir": str(avatars.output_dir)}
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
+            `contains` is a regex filter, `level` keeps one of INFO/WARNING/ERROR.
+            Every result carries the log's age and how it compares to the
+            executable beside it, so a stale file cannot be read as current.
+            """
+            try:
+                return await anyio.to_thread.run_sync(logs.read, target, lines, contains, level)
+            except ValueError as e:
+                return {"error": str(e)}
 
     # --- HTTP app ----------------------------------------------------------
 
@@ -666,6 +652,7 @@ def build(cfg: Config):
 
     app.router.lifespan_context = lifespan
 
+    app.state.mcp = mcp                      # so a test can list what got registered
     app.routes.append(WebSocketRoute("/notify", notify))
     app.routes.append(Route("/api/health", health, methods=["GET"]))
     app.routes.append(Route("/api/send", api_send, methods=["POST"]))

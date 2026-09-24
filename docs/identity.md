@@ -24,11 +24,11 @@ Two things had to become true:
 
 | Term | Meaning | In the code |
 |---|---|---|
-| **agent** | A *name* in the mailbox — a role such as `rl-claude` ("the Claude in Rogue-Lite"), `rl-codex`, `sisyphus`, `gifterboard`. Anything can be behind it: a Claude session, a Codex session, a script, a bot, a human with `curl`. Not a machine, not a conversation. | the `agents` map in `config.json`; the `to`/`sender` of a message; `?agent=` |
+| **agent** | A *name* in the mailbox — a role such as `agent-a` ("the Claude in repo-a"), `agent-b`, `remote-agent`, `review-bot`. Anything can be behind it: a Claude session, a Codex session, a script, a bot, a human with `curl`. Not a machine, not a conversation. | the `agents` map in `config.json`; the `to`/`sender` of a message; `?agent=` |
 | **credential** | Proves an agent name. One per role, issued by the operator with `agent add`. The only source of identity. | `auth.Credentials.agent_tokens` |
 | **principal** | What a credential resolves to: a name plus whether it is the admin. | `auth.Principal` |
 | **admin** | This bridge's own credential — the single `token`. Its name is `self_name`. May send as any name and read any mailbox, including the `*` wildcard listener. For the operator (scripts, local `curl`), never for an agent. | `Principal.admin`, `Credentials.admin_token` |
-| **instance** | One session of a role: `rl-claude#3f2a`. Self-declared, not separately authenticated; shares the role's credential and trust. Reserved in S1, delivered in S1b. | `Principal.may_read` accepts `name#…` |
+| **instance** | One session of a role: `agent-a#3f2a`. Self-declared, not separately authenticated; shares the role's credential and trust. Reserved in S1, delivered in S1b. | `Principal.may_read` accepts `name#…` |
 | **mailbox** | The queue a name owns. Exists the moment anyone addresses the name. | `mailbox.Mailbox` |
 | **peer** | Prose only: a remote machine. Not a concept in the code. | — |
 
@@ -95,15 +95,15 @@ server, keep the middleware and record why.
 A mailbox is consumed by its reader: `bridge_inbox` marks read, and a frame
 written to a `/notify` socket under the addressee's own name is consumed. With
 one session per role that is the obvious behaviour. With several instances of
-one role — three `rl-claude` terminals — the question "who gets a message to
-`rl-claude`?" has three standard answers, and the design supports all three
+one role — three `agent-a` terminals — the question "who gets a message to
+`agent-a`?" has three standard answers, and the design supports all three
 rather than choosing one:
 
 | Address | Semantics | Messaging name | Use |
 |---|---|---|---|
-| `rl-claude` | first live instance to read it consumes it | work queue / competing consumers | "someone in Rogue-Lite, answer this" — what the bridge does today |
-| `rl-claude#3f2a` | only that instance | direct / reply-to | replying to the session that asked |
-| `rogue-lite` (a group, S1c) | one copy per member mailbox | pub/sub / fan-out | "I changed the contract, everyone" |
+| `agent-a` | first live instance to read it consumes it | work queue / competing consumers | "someone in repo-a, answer this" — what the bridge does today |
+| `agent-a#3f2a` | only that instance | direct / reply-to | replying to the session that asked |
+| `repo-a` (a group, S1c) | one copy per member mailbox | pub/sub / fan-out | "I changed the contract, everyone" |
 
 A message's `sender` becomes the full address when the sender declared an
 instance, so a reply naturally goes back to the asker; `thread` remains the
@@ -185,6 +185,6 @@ SSE load (G4). Nothing in S1 moves any of them closer.
 - Identity is re-derived from the request in each tool call, not stashed.
 - An agent's claimed `sender` is silently replaced with its own name, not
   refused, and the response reports the sender used: a session that calls
-  itself `rl-claude-worker` should not be blocked.
+  itself `agent-a-worker` should not be blocked.
 - Work-queue delivery is the default for a bare name; fan-out is explicit.
 - `/api/health` says nothing about traffic.

@@ -5,14 +5,11 @@
 import asyncio
 import json
 import os
-import struct
 import sys
-import zlib
 from pathlib import Path
 
 import pytest
 
-from agent_bridge.avatar import rgba_to_png
 from agent_bridge.execute import ExecDenied, Runner, child_env
 from agent_bridge.files import Files, PathDenied
 from agent_bridge.mailbox import Mailbox
@@ -23,9 +20,9 @@ from agent_bridge.patterns import Deadline
 def tree(tmp_path: Path):
     root = tmp_path / "proj"
     (root / "src").mkdir(parents=True)
-    (root / "src" / "main.cs").write_text("const int AvatarSize = 64;\nvar x = 1;\n")
+    (root / "src" / "main.cs").write_text("const int MaxSize = 64;\nvar x = 1;\n")
     (root / "node_modules").mkdir()
-    (root / "node_modules" / "junk.js").write_text("AvatarSize\n")
+    (root / "node_modules" / "junk.js").write_text("MaxSize\n")
     (root / ".env").write_text("SECRET=hunter2\n")
     (tmp_path / "outside.txt").write_text("should never be readable\n")
     return root, tmp_path
@@ -58,7 +55,7 @@ def test_root_prefix_resolves_and_reads(tree):
     root, _ = tree
     f = Files({"proj": root})
     out = f.read("proj:src/main.cs")
-    assert "AvatarSize" in out["text"]
+    assert "MaxSize" in out["text"]
     assert out["total_lines"] == 2
 
 
@@ -199,7 +196,7 @@ def test_patterns_that_are_expensive_to_compile_are_refused_fast(pattern):
 
 @pytest.mark.parametrize("pattern", [
     "(a{100}){100}", "[a-z]{1000}", "(a|b){500}c{500}", r"\{1000\}", "[{]{5}",
-    r"AvatarSize\s*=\s*(\d+)", "^(([a-z])+.)+[A-Z]([a-z])+$", "a{5,}b*c+",
+    r"MaxSize\s*=\s*(\d+)", "^(([a-z])+.)+[A-Z]([a-z])+$", "a{5,}b*c+",
 ])
 def test_reasonable_patterns_still_compile(pattern):
     from agent_bridge.patterns import compile_pattern
@@ -223,7 +220,7 @@ def test_a_bad_pattern_is_an_error_not_a_crash(tree):
 def test_grep_skips_denied_directories(tree):
     root, _ = tree
     f = Files({"proj": root})
-    res = f._grep_python("AvatarSize", [root], "", 50, 0, False)
+    res = f._grep_python("MaxSize", [root], "", 50, 0, False)
     assert res["count"] == 1, res
     assert "node_modules" not in res["matches"][0]
 
@@ -441,24 +438,6 @@ async def test_malformed_spec_env_is_a_refusal_not_a_crash(tmp_path, bad):
         await Runner(cmds, {"proj": tmp_path}, True).run("x", root="proj")
 
 
-# --- png encoder -----------------------------------------------------------
-
-def test_rgba_to_png_round_trips_through_zlib():
-    w = h = 4
-    rgba = bytes([200, 100, 50, 255]) * (w * h)
-    png = rgba_to_png(rgba, w, h)
-
-    assert png[:8] == b"\x89PNG\r\n\x1a\n"
-    width, height, depth, ctype = struct.unpack(">IIBB", png[16:26])
-    assert (width, height, depth, ctype) == (w, h, 8, 6)
-
-    idat = png[png.index(b"IDAT") + 4:]
-    raw = zlib.decompress(idat[:-12])
-    # Each row is one filter byte followed by the row's pixels.
-    assert len(raw) == h * (1 + w * 4)
-    assert raw[1:5] == bytes([200, 100, 50, 255])
-
-
 # --- MCP transport host allowlist ------------------------------------------
 #
 # Regression: the SDK's DNS-rebinding protection defaults to an EMPTY allowlist,
@@ -497,22 +476,29 @@ def test_host_ok_mirrors_the_sdk_matching_rule():
     assert not _host_ok("sisyphus:8791", allowed)
 
 
-# --- game logs -------------------------------------------------------------
+# --- named log files -------------------------------------------------------
 #
-# The staleness reporting is the point of this module: an absent or old
-# engine.log is what gets misread as "the subsystem never ran".
+# The staleness reporting is the point of this module: an absent or old log
+# is what gets misread as "the subsystem never ran". Nothing here is specific
+# to any program: names, executables and skip dirs come from the config.
 
 from agent_bridge.logs import Logs
+
+LOG_CFG = dict(names=["app.log", "diag.log"], exe_names=["App.exe", "App.dll"])
+
+
+def _logs(root) -> Logs:
+    return Logs({"proj": root}, **LOG_CFG)
 
 
 def _build(tmp_path, with_log=True, log_older=False):
     d = tmp_path / "platform" / "desktop" / "bin" / "Debug"
     d.mkdir(parents=True)
-    (d / "RogueLite.exe").write_text("binary")
+    (d / "App.exe").write_text("binary")
     if with_log:
-        log = d / "engine.log"
-        log.write_text("[INFO] [LiveFeed] Connecting to ws://host/ws/game?u=someone\n"
-                       "[WARNING] [LiveFeed] Unable to connect\n"
+        log = d / "app.log"
+        log.write_text("[INFO] [Feed] Connecting to ws://host/ws/feed?u=someone\n"
+                       "[WARNING] [Feed] Unable to connect\n"
                        "[ERROR] boom\n")
         if log_older:
             os.utime(log, (1, 1))          # far older than the exe
@@ -521,29 +507,38 @@ def _build(tmp_path, with_log=True, log_older=False):
 
 def test_logs_are_found_inside_bin_which_bridge_read_refuses(tmp_path):
     _build(tmp_path)
-    out = Logs({"proj": tmp_path}).list()
+    out = _logs(tmp_path).list()
     assert len(out["logs"]) == 1
-    assert out["logs"][0]["name"] == "engine.log"
+    assert out["logs"][0]["name"] == "app.log"
     assert out["logs"][0]["lines"] == 3
 
 
-def test_a_build_with_no_engine_log_is_reported_not_omitted(tmp_path):
+def test_a_build_with_no_log_is_reported_not_omitted(tmp_path):
     _build(tmp_path, with_log=False)
-    out = Logs({"proj": tmp_path}).list()
+    out = _logs(tmp_path).list()
     assert out["logs"] == []
-    assert len(out["builds_without_engine_log"]) == 1
-    assert "OLD BINARY" in out["builds_without_engine_log"][0]["note"]
+    assert len(out["builds_with_missing_logs"]) == 1
+    assert out["builds_with_missing_logs"][0]["missing"] == ["app.log", "diag.log"]
+    assert "OLD BINARY" in out["builds_with_missing_logs"][0]["note"]
 
 
 def test_a_log_older_than_its_exe_says_so(tmp_path):
     _build(tmp_path, log_older=True)
-    row = Logs({"proj": tmp_path}).list()["logs"][0]
+    row = _logs(tmp_path).list()["logs"][0]
     assert "OLDER" in row["note"]
+
+
+def test_no_exe_names_means_no_build_notes_and_no_missing_scan(tmp_path):
+    _build(tmp_path)
+    lg = Logs({"proj": tmp_path}, names=["app.log"])
+    out = lg.list()
+    assert out["logs"][0]["build_exe"] is None
+    assert out["builds_with_missing_logs"] == []
 
 
 def test_level_and_regex_filters(tmp_path):
     _build(tmp_path)
-    lg = Logs({"proj": tmp_path})
+    lg = _logs(tmp_path)
     assert lg.read(level="WARNING")["matched_lines"] == 1
     assert lg.read(contains="u=([a-z.]+)")["matched_lines"] == 1
     assert lg.read()["matched_lines"] == 3          # defaults to newest log
@@ -552,36 +547,47 @@ def test_level_and_regex_filters(tmp_path):
 def test_log_contains_filter_is_bounded_too(tmp_path, monkeypatch):
     import agent_bridge.logs as logs_mod
     d = _build(tmp_path)
-    (d / "engine.log").write_text("[INFO] " + "a" * 40 + "b\n")
+    (d / "app.log").write_text("[INFO] " + "a" * 40 + "b\n")
     monkeypatch.setattr(logs_mod, "FILTER_TIMEOUT_S", 0.5)
-    res = Logs({"proj": tmp_path}).read("proj:platform/desktop/bin/Debug/engine.log",
-                                        contains=r"(a|a)*$")
+    res = _logs(tmp_path).read("proj:platform/desktop/bin/Debug/app.log", contains=r"(a|a)*$")
     assert "timed out" in res["error"]
 
 
 def test_only_log_filenames_are_readable(tmp_path):
     d = _build(tmp_path)
-    (d / "RogueLite.dll.config").write_text("secret")
+    (d / "App.dll.config").write_text("secret")
     with pytest.raises(ValueError, match="not a log"):
-        Logs({"proj": tmp_path})._resolve("proj:platform/desktop/bin/Debug/RogueLite.exe")
+        _logs(tmp_path)._resolve("proj:platform/desktop/bin/Debug/App.exe")
 
 
 def test_log_outside_every_root_is_refused(tmp_path):
     _build(tmp_path)
-    outside = tmp_path.parent / "engine.log"
+    outside = tmp_path.parent / "app.log"
     outside.write_text("x")
     with pytest.raises(ValueError, match="outside every configured root"):
-        Logs({"proj": tmp_path})._resolve(str(outside))
+        _logs(tmp_path)._resolve(str(outside))
 
 
-def test_a_folder_with_diag_but_no_engine_log_is_still_flagged(tmp_path):
-    # Regression: dist/live has a diag.log and no engine.log. Keying the
-    # missing-scan on "any log found here" hid exactly that build.
+def test_a_folder_with_a_secondary_log_but_no_primary_is_still_flagged(tmp_path):
+    # Regression: a published build had a diag.log and no primary log. Keying
+    # the missing-scan on "any log found here" hid exactly that build.
     d = _build(tmp_path, with_log=False)
     (d / "diag.log").write_text("=== session start ===\n")
-    out = Logs({"proj": tmp_path}).list()
+    out = _logs(tmp_path).list()
     assert any(r["name"] == "diag.log" for r in out["logs"])
-    assert len(out["builds_without_engine_log"]) == 1, out
+    assert len(out["builds_with_missing_logs"]) == 1, out
+    assert out["builds_with_missing_logs"][0]["missing"] == ["app.log"]
+
+
+def test_skip_dirs_from_config_extend_the_defaults(tmp_path):
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "app.log").write_text("x")
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "app.log").write_text("x")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.log").write_text("x")
+    out = Logs({"proj": tmp_path}, names=["app.log"], skip_dirs=["vendor"]).list()
+    assert [r["path"] for r in out["logs"]] == ["proj:src/app.log"]
 
 
 # --- mailbox persistence ---------------------------------------------------
@@ -704,73 +710,6 @@ def test_ws_backlog_marked_read_is_not_replayed_after_restart(tmp_path):
     assert Mailbox(store=store).inbox("fenrir", peek=True) == []
 
 
-# --- avatar_png output containment -----------------------------------------
-#
-# Regression: to_png used to write wherever the caller pointed it. On a bridge
-# whose whole posture is "read-only plus an allowlist", one tool that writes to
-# an arbitrary absolute path is a write primitive over the server's whole disk.
-
-from agent_bridge.avatar import Avatars, OutputDenied
-
-
-@pytest.fixture
-def avatars(tmp_path: Path):
-    a = Avatars({"url": "http://unused", "avatar_size": 2}, {}, output_dir=tmp_path / "out")
-
-    async def fake_fetch(uid, size=0, creator=""):
-        return (bytes([9, 9, 9, 255]) * 4,
-                {"url": "u", "status": 200, "content_type": "", "requested_size": 2})
-
-    a.fetch = fake_fetch
-    return a
-
-
-async def test_png_lands_under_the_output_dir(avatars, tmp_path):
-    res = await avatars.to_png("uid", "faces/one.png")
-    assert res["written"] is True
-    assert Path(res["path"]) == (tmp_path / "out" / "faces" / "one.png").resolve()
-    assert Path(res["path"]).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
-
-
-@pytest.mark.parametrize("bad, would_land", [
-    ("../../x.png", "x.png"),                  # relative escape -> tmp_path.parent
-    (r"..\..\escaped.png", "escaped.png"),     # backslash spelling of the same
-    ("{abs}/elsewhere.png", "elsewhere.png"),  # absolute path outside the dir
-    ("inside.cs", None),                       # right place, wrong kind of file
-    ("inside.png.ps1", None),                  # suffix that only looks like png
-    ("evil.ps1:x.png", None),                  # NTFS alternate data stream
-    ("", None),
-])
-async def test_writes_outside_or_not_png_are_refused(avatars, tmp_path, bad, would_land):
-    with pytest.raises(OutputDenied):
-        await avatars.to_png("uid", bad.format(abs=tmp_path.as_posix()))
-    # Check where each escape would actually have resolved to, not a guess.
-    if would_land:
-        assert not (tmp_path.parent / would_land).exists()
-        assert not (tmp_path / would_land).exists()
-    out = tmp_path / "out"
-    assert not out.exists() or not list(out.rglob("*")), "something landed in out/"
-
-
-async def test_denied_path_never_reaches_the_network(avatars):
-    async def explode(*a, **k):
-        raise AssertionError("fetch was called for a path that should have been refused")
-    avatars.fetch = explode
-    with pytest.raises(OutputDenied):
-        await avatars.to_png("uid", "../nope.png")
-
-
-async def test_absolute_path_inside_output_dir_is_fine(avatars, tmp_path):
-    res = await avatars.to_png("uid", str(tmp_path / "out" / "abs.png"))
-    assert res["written"] is True
-
-
-async def test_no_output_dir_means_no_writes_at_all(tmp_path):
-    a = Avatars({"url": "http://unused"}, {}, output_dir=None)
-    with pytest.raises(OutputDenied, match="disabled"):
-        a._output_path("anything.png")
-
-
 # --- the event loop stays free during slow I/O ------------------------------
 #
 # Regression: the SDK calls a plain-function tool inline on the loop, so a grep
@@ -814,9 +753,9 @@ async def test_ripgrep_timeout_keeps_partial_matches(tree, monkeypatch):
     # rg finds matches quickly; a tiny budget must still return what arrived.
     root, _ = tree
     for i in range(300):
-        (root / "src" / f"m{i}.txt").write_text("AvatarSize\n" * 200)
+        (root / "src" / f"m{i}.txt").write_text("MaxSize\n" * 200)
     f = Files({"proj": root}, grep_timeout_s=0.001)
-    res = await f.grep("AvatarSize", limit=50)
+    res = await f.grep("MaxSize", limit=50)
     assert res["engine"] == "ripgrep"
     if res.get("reason") == "timeout":
         assert res["truncated"] is True and "matches it had found" in res["note"]
@@ -825,6 +764,6 @@ async def test_ripgrep_timeout_keeps_partial_matches(tree, monkeypatch):
 @pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep not on PATH")
 async def test_ripgrep_path_is_awaited(tree):
     root, _ = tree
-    res = await Files({"proj": root}).grep("AvatarSize")
+    res = await Files({"proj": root}).grep("MaxSize")
     assert res["engine"] == "ripgrep"
     assert res["count"] == 1 and "node_modules" not in res["matches"][0]

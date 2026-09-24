@@ -224,3 +224,61 @@ def test_no_subcommand_means_serve(monkeypatch):
                         lambda c, h, p: seen.update(config=c, host=h, port=p) or 0)
     assert main(["--host", "127.0.0.1", "--port", "1"]) == 0
     assert seen == {"config": None, "host": "127.0.0.1", "port": 1}
+
+
+# --- nothing project-specific in the core (G1, G2) ---------------------------
+#
+# A config that names no roots, logs or commands must produce a bridge that
+# names none: the instructions string, the tool list and the defaults all come
+# from the config, never from wherever this was first deployed.
+
+def test_instructions_name_only_what_the_config_names():
+    from agent_bridge.logs import Logs
+    from agent_bridge.server import _instructions
+    cfg = Config({"self_name": "hub", "token": "t", "mailbox_store": ""})
+    text = _instructions(cfg, Logs({}))
+    assert "hub" in text
+    for word in ("logs_read", "bridge_run", "root", "/", "\\"):
+        assert word not in text.split("bridge_capabilities")[0]
+    assert "logs_" not in text and "bridge_run" not in text
+
+    cfg = Config({"self_name": "hub", "token": "t", "mailbox_store": "",
+                  "description": "the build box", "roots": {"repo-a": "."},
+                  "logs": {"names": ["app.log"]},
+                  "exec": {"enabled": True, "commands": {"build": {"argv": ["make"]}}}})
+    text = _instructions(cfg, Logs(cfg.roots, names=cfg.logs["names"]))
+    assert "the build box" in text and "repo-a" in text
+    assert "app.log" in text and "build" in text
+
+
+async def test_no_logs_block_means_no_log_tools():
+    from agent_bridge.server import build
+
+    async def tools(data):
+        app = build(Config({"token": "t", "mailbox_store": "", **data}))
+        return {t.name for t in await app.state.mcp.list_tools()}
+
+    bare = await tools({})
+    assert not any(t.startswith(("logs_", "avatar_")) for t in bare), bare
+    assert {"bridge_send", "bridge_inbox", "bridge_read", "bridge_run"} <= bare
+    with_logs = await tools({"logs": {"names": ["app.log"]}})
+    assert {"logs_list", "logs_read"} <= with_logs
+
+
+def test_old_avatar_keys_are_refused_with_a_pointer(tmp_path):
+    with pytest.raises(SystemExit, match="docs/examples"):
+        Config({"token": "t", "gifterboard": {"url": "x"}})
+    with pytest.raises(SystemExit, match="docs/examples"):
+        Config({"token": "t", "output_dir": "out"})
+
+
+def test_logs_config_is_validated():
+    with pytest.raises(SystemExit, match="filenames, not paths"):
+        Config({"token": "t", "logs": {"names": ["bin/app.log"]}})
+    with pytest.raises(SystemExit, match="list of filenames"):
+        Config({"token": "t", "logs": {"names": "app.log"}})
+
+
+def test_self_name_defaults_to_the_hostname():
+    import socket
+    assert Config({"token": "t"}).self_name == socket.gethostname().lower()

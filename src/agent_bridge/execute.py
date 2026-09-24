@@ -5,7 +5,7 @@
 # Allowlisted command execution.
 #
 # The allowlist is keyed by NAME, not by prefix matching on a caller-supplied
-# string. A remote agent asks for "viewers"; it never gets to compose a command
+# string. A remote agent asks for "build"; it never gets to compose a command
 # line. Prefix matching is the version of this that looks equivalent and is not:
 # "git log" as an allowed prefix also permits "git log; rm -rf".
 #

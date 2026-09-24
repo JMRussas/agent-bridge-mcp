@@ -10,22 +10,35 @@ Status key: `[ ]` open, `[~]` in progress, `[x]` done, `[-]` dropped (say why).
 
 ## The product in one paragraph
 
-A self-hosted, one-port bridge that lets a coding agent on machine A ask the
-agent on machine B a question — and, more often, answer it without asking,
-by reading B's source trees, tailing B's logs and running a short allowlist of
-commands there. Durable mailbox first, live push second, no cloud. The mailbox
-half has competitors (MCP Agent Mail, mailbox-mcp, AgentsRoom); the
-"peer-machine bridge" combination of mailbox + scoped read + guarded exec does
-not. Project-specific probes (the avatar contract) are an *extension*, not the
-product.
+A self-hosted, one-port communication bridge that lets any agents and models
+talk to each other by name: a durable mailbox with live push, a directory of
+who is reachable, and identity that comes from a credential rather than a
+claim. Participants are of three kinds and the bridge treats them alike —
+**self-driving agents** that connect themselves (Claude Code, Codex, a
+script), **model endpoints** (Azure AI Foundry, AWS Bedrock, Ollama, the
+Anthropic API) that an *adapter process* turns into a participant by running
+the loop around them, and **humans** through a console or `curl`. Where a
+machine's source or commands must be exposed, the same process also offers
+scoped read and allowlisted exec over the trees it is given. Durable first,
+pushed second, no cloud. The mailbox half has competitors (MCP Agent Mail,
+mailbox-mcp, AgentsRoom); the combination of mailbox + credential identity +
+model adapters + guarded machine access does not. Nothing in the core knows
+what project it is used on: the game it was built for is where it came from,
+not what it is.
 
 ## Non-goals
 
-- Not an orchestrator. It carries messages; it does not assign work.
+- Not an orchestrator. It carries messages; it does not assign work. An
+  adapter runs *one* participant's loop; it does not schedule others.
+- Not a model gateway. Adapters call providers directly with the operator's
+  own keys; the bridge never proxies, meters or bills model traffic.
 - Not internet-facing. LAN or an overlay network (Tailscale/WireGuard). We
   will not build TLS termination; we will document how to put it behind one.
 - Not multi-tenant. One config, one owner, a handful of named agents on a
   handful of machines.
+- Not project-specific. No probe, log name, path or command for any one
+  project lives in `src/`; that is what `roots`, `exec.commands` and
+  extensions are for.
 
 ---
 
@@ -185,7 +198,7 @@ product.
   `secrets*.json`, `appsettings.*.json`, `.git-credentials`, `.npmrc`,
   `.pypirc`, `*.kdbx`, `id_*`. `deny` in config appends; `allow` can punch a
   hole per root. Apply the same list to `bridge_list`, `bridge_grep` output
-  and `avatar_png`.
+  and anything that writes.
   *AC:* table-driven test over the default list.
 
 - [x] **S7 minimal unauthenticated health** (S)
@@ -199,20 +212,42 @@ product.
   layer where a regression is a security bug. *Started in B3
   (`tests/test_http.py`); grows with each Sprint 1 story.*
 
-## Sprint 2 — make it not-about-Rogue-Lite
+## Sprint 2 — make it general (nothing project-specific in the core)
 
-- [ ] **G1 instructions from config** (S)
-  The MCP `instructions` string is hard-coded to FENRIR. Build it from
-  `self_name`, `roots`, `description` (new key) and the registered tools.
+- [x] **G1 instructions from config** (S)
+  The MCP `instructions` string was hard-coded to one machine and one game.
+  Now built by `server._instructions()` from `self_name`, `description` (new
+  key), `roots`, the configured log names and the enabled commands, so a
+  peer learns what *this* bridge exposes.
+  *AC:* the string names no machine, repo or tool that is not in the config
+  (`tests/test_cli.py::test_instructions_name_only_what_the_config_names`).
 
-- [ ] **G2 extensions** (L)
-  `avatar_*` and `logs_*` move to `agent_bridge/ext/` and register through an
-  `extensions: ["agent_bridge.ext.avatar", "agent_bridge.ext.gamelogs"]`
-  config list. `logs` becomes generic: `log_names`, `exe_names`, `skip_dirs`
-  come from config with the current values as the example. `avatar` stays
-  as the worked example of a contract probe and ships disabled by default.
-  *AC:* a config with no extensions exposes exactly the mailbox, files and
-  exec tools; the existing tests still pass with both extensions enabled.
+- [x] **G2 take the game out of the core** (M) — *was "extensions"; the
+  avatar probe is removed rather than kept as the example.*
+  Deleted `avatar.py`, the three `avatar_*` tools, the `gifterboard` and
+  `output_dir` config keys (a config that still has them is refused with a
+  pointer to `docs/examples/`), `httpx` from the runtime dependencies, and
+  the avatar sections of CLAUDE.md and the README. `logs.py` is generic:
+  `logs.names`, `logs.exe_names` and `logs.skip_dirs` come from config with
+  no program-specific defaults, and `logs_*` tools register only when
+  `logs.names` is set. `self_name` defaults to the hostname. The example
+  config's roots and commands are placeholders; the game config lives in
+  `docs/examples/rogue-lite.md`. `output_dir` went with `avatar_png`; the
+  first tool that writes reintroduces a confined one.
+  *AC:* `grep -ri "rogue\|sluzzy\|avatar\|fenrir\|sisyphus" src/` is empty
+  (the retired-key guard in `config.py` is the one permitted mention of
+  `gifterboard`); a config with no `logs` block exposes exactly the mailbox,
+  files and exec tools; the test suite passes without the game repos present.
+
+- [x] **G6 docs and diagrams say what the tool is, not where it runs** (S)
+  CLAUDE.md, the README, `docs/identity.md`, `docs/threat-model.md` and
+  `docs/diagrams/*.svg` name no machine, agent, repo or service. The
+  deployment view shows *hub machine* / *peer machine*, *agent-a* /
+  *agent-b* / *remote-agent*, *repo-a* / *repo-b*; the class view drops the
+  removed class; the sequence view is unchanged in shape. The two-machine
+  game setup survives only in `docs/examples/`.
+  *AC:* the same grep as G2 over `docs/`, `README.md` and `CLAUDE.md`
+  matches only `docs/examples/` and this roadmap's history.
 
 - [ ] **G3 normalise root names at load; validate config** (S)
   Lower-case keys once in `Config`; reject unknown top-level keys with a
@@ -249,7 +284,7 @@ product.
   better answer and replace them.)
 
 - [ ] **P4 listener CLI + Claude Code hook example** (M)
-  `agent-bridge listen --as fenrir` prints frames to stdout; a `hooks/`
+  `agent-bridge listen --as <name>` prints frames to stdout; a `hooks/`
   example that starts it and a `SessionStart` snippet that drains the inbox.
   Removes the "hand-roll curl" step from the receiving side.
 
@@ -257,13 +292,90 @@ product.
   GitHub Actions: pytest on Windows + Linux, ruff, mypy on `src/`. Pin
   dependencies with a lock file.
 
-- [ ] **P6 versioned tool surface** (S)
-  `bridge_capabilities` reports `api_version`; a changelog; breaking tool
-  changes bump it so two machines on different versions say so instead of
-  guessing.
+- [ ] **P6 versioned wire surface** (S) — *the contract everything else
+  builds against.*
+  `bridge_capabilities` and `/api/health` report `api_version`; the REST,
+  WebSocket and tool surfaces are documented in one place (`docs/wire.md`);
+  a changelog; breaking changes bump the version so two machines, a console
+  or an adapter on different versions say so instead of guessing. Pulled up
+  in priority: the console (U1) and the adapters (Sprint 4) are clients of
+  this surface, and so would any future rewrite be.
+
+- [ ] **U0 `GET /api/history` and an observer credential** (S)
+  `bridge_history` has no REST twin, so nothing but an MCP client can read
+  the past. Add `/api/history?agent=&thread=&limit=`. Add an `observer:
+  true` flag on a credential: may read every mailbox and listen as `*`, may
+  not send and is not admin — the credential a console holds, so the admin
+  token never lives in a browser tab.
+  *AC:* an observer reads any inbox with `peek` forced on and gets 403 on
+  `POST /api/send`; the admin token is not needed by the console.
+
+- [ ] **U1 read-only console at `/ui`** (M)
+  One static page served by the bridge itself (same origin, no CORS, no
+  build step): the directory on the left (name, description, unread,
+  last seen, credentialed or not), the message stream on the right, filter
+  by agent and thread, live over `/notify?agent=*` with the observer
+  credential entered once and kept in `sessionStorage`. Message bodies are
+  untrusted text (`docs/threat-model.md`): rendered with `textContent`,
+  never as HTML. No sending in v1. History is only as deep as retention
+  until P3.
+  *AC:* the console never marks a message read; a message body containing
+  `<script>` renders as text; the page works with only an observer token.
+
+## Sprint 4 — participants: models behind names
+
+A model endpoint calls nothing; something has to receive a message, build the
+prompt, call the model and post the reply. That something is an **adapter**:
+a separate process holding an ordinary agent credential, so the core does not
+change and "anything can be behind a name" stays literally true. Preconditions
+before an adapter gets any tool beyond the mailbox: S2 (framing), S2b (exec
+approval) and S3 (scopes). A hosted model is the least-defended reader of
+untrusted text in the system.
+
+- [ ] **M1 `agent-bridge participant`** (M)
+  `agent-bridge participant --as <name> --provider <p> --model <id>
+  [--system <file>]` runs the loop: `wait` on the mailbox (long-poll or
+  `/notify`), build a chat from the thread (G5) plus a system prompt, call
+  the model, `send` the reply on the same thread. Reconnects, backs off,
+  logs one line per turn. Runs anywhere the bridge is reachable; needs only
+  the participant's own credential and the provider's keys from *its* env.
+  *AC:* a message to the participant's name gets a reply on the same thread
+  from a fake provider; a crash mid-turn does not lose the message (it is
+  still unread); two participants on one machine cannot read each other's
+  mail.
+
+- [ ] **M2 providers: Ollama, Azure AI Foundry, AWS Bedrock, Anthropic** (M)
+  One `Provider` interface (`chat(messages, system) -> text`), four
+  implementations behind it, chosen by `--provider`. Ollama and Foundry via
+  their OpenAI-compatible chat endpoints; Bedrock via the Converse API;
+  Anthropic via the Messages API. Keys and endpoints come from the
+  adapter's environment or a per-participant config file, never from the
+  bridge's `config.json` and never over the bridge.
+  *AC:* a recorded-response test per provider; a wrong key produces a
+  one-line error to the operator and *no* message on the bridge.
+
+- [ ] **M3 tools for a hosted participant** (M) — *after S2b and S3.*
+  A participant may be given a scope list; the adapter exposes the matching
+  bridge tools (`bridge_read`, `bridge_grep`, `bridge_run`…) to the model
+  as tool calls, executed through the participant's own credential so the
+  bridge enforces the scope, not the adapter. Exec always goes through the
+  approval gate.
+  *AC:* a participant with `scopes: ["mail"]` cannot read a file however
+  the model asks; a `bridge_run` from a participant blocks on approval.
+
+- [ ] **M4 participant memory** (S)
+  Per-thread context window built from `bridge_history(thread=)`, trimmed
+  to a token budget oldest-first; a participant with no thread sees only
+  the one message. Nothing is stored outside the mailbox.
 
 ## Later / needs a decision
 
+- [ ] **L7 TypeScript / Nest.js rewrite** (L) — *decided against for now;
+  see the 2026-09-24 decision.* Revisit if any of: the console outgrows a
+  static page; adapters multiply into a module system that wants DI; the
+  MCP Python SDK falls behind the TypeScript one on a feature this needs.
+  If revisited: port `tests/` first as the spec, use `re2` for
+  caller-supplied regexes (V8's engine has no timeout), keep one runtime.
 - [ ] **L1 Tailscale-native identity** (L) — bind to the tailnet interface,
   derive peer identity from `tailscale whois` / the identity header, drop the
   shared token entirely when present. Gives TLS, NAT traversal and real
@@ -334,3 +446,33 @@ product.
   filtered in `pyproject.toml` so real MCP sessions can be tested under
   warnings-as-errors. Nothing in this package creates a memory stream, so the
   filter cannot hide one of ours.
+- **2026-09-24** — The product is a general communication bridge for any
+  agents and models, not a tool for one game on two machines. Consequences:
+  the product paragraph and non-goals rewritten; Sprint 2 becomes "make it
+  general" and **the avatar probe leaves the core** (supersedes the
+  2026-09-17 "extension, not deleted" call — with no second project using
+  it, an example that ships in `src/` is coupling, not documentation);
+  `logs` gets no defaults; the game setup survives only under
+  `docs/examples/`.
+- **2026-09-24** — Agents and models are different things and the design
+  says so. An agent connects itself; a model endpoint (Foundry, Bedrock,
+  Ollama, Anthropic) needs a loop run around it. That loop is an **adapter
+  process** holding an ordinary agent credential (Sprint 4), not a feature
+  of the bridge — so the core stays dumb, the identity model is unchanged,
+  and "not an orchestrator" still holds. Adapters get tools only after S2b
+  and S3 exist.
+- **2026-09-24** — No rewrite to TypeScript/Nest.js now (L7). The core is
+  small, tested, and its value is a set of security properties, not a
+  framework; a rewrite mid-Sprint 1 would stall the identity and injection
+  work and reintroduce the Sprint 0 bugs. Instead the **wire surface is the
+  contract** (P6 pulled up): the console, the adapters and any future
+  rewrite are clients of it.
+- **2026-09-24** — A console holds an **observer** credential (U0), never
+  the admin token: read everything, send nothing, not admin. The console is
+  served by the bridge itself so there is no CORS surface, and it renders
+  message bodies as text because XSS is the browser form of the injection
+  in `docs/threat-model.md`.
+- **2026-09-24** — Architecture diagrams live in `docs/diagrams/` as SVG,
+  embedded in the README, and are redrawn when the code changes shape. The
+  first set drew the code as it was and therefore named the game, the
+  machines and the agents; G6 replaces it with the general form.
