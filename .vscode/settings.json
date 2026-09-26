@@ -1,0 +1,7 @@
+{
+  "// files.eol": "LF, to match .gitattributes and .editorconfig. VS Code reads .editorconfig only with the extension installed; this setting needs nothing.",
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "[powershell]": { "files.eol": "\r\n" },
+  "[bat]": { "files.eol": "\r\n" }
+}

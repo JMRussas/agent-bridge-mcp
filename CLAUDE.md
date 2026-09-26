@@ -234,6 +234,15 @@ ranks the vectors and the controls, in the order they are being built.
 
 ## Gotchas
 
+- **Line endings are LF, and the working copy must match, not just the
+  commit.** `.gitattributes` normalises to LF on commit (CRLF only for
+  `*.ps1`/`*.bat`/`*.cmd`), `.editorconfig` and `.vscode/settings.json` make
+  editors write LF, and the repo's git config has `core.autocrlf=false`,
+  `core.eol=lf`. The thing that kept breaking it was scripts: **Python's
+  `write_text()` on Windows writes CRLF unless you pass `newline="\n"`**, and
+  the next commit then warns for every file touched. `tests/test_repo_hygiene.py`
+  fails on any tracked text file with the wrong ending, so it is caught where
+  it is introduced.
 - **The MCP transport has its own Host allowlist, and the SDK's default is
   empty.** `TransportSecurityMiddleware` (DNS-rebinding protection) answers every
   request whose `Host` header is not on the list with **421 Misdirected
