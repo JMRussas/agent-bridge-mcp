@@ -520,6 +520,18 @@ def test_a_build_with_no_log_is_reported_not_omitted(tmp_path):
     assert len(out["builds_with_missing_logs"]) == 1
     assert out["builds_with_missing_logs"][0]["missing"] == ["app.log", "diag.log"]
     assert "OLD BINARY" in out["builds_with_missing_logs"][0]["note"]
+    assert "app.log, diag.log" in out["builds_with_missing_logs"][0]["note"]
+
+
+def test_missing_secondary_log_warning_does_not_name_existing_primary(tmp_path):
+    _build(tmp_path)
+    out = _logs(tmp_path).list()
+    assert [row["name"] for row in out["logs"]] == ["app.log"]
+    assert len(out["builds_with_missing_logs"]) == 1
+    row = out["builds_with_missing_logs"][0]
+    assert row["missing"] == ["diag.log"]
+    assert "diag.log" in row["note"]
+    assert "app.log" not in row["note"]
 
 
 def test_a_log_older_than_its_exe_says_so(tmp_path):
@@ -577,6 +589,8 @@ def test_a_folder_with_a_secondary_log_but_no_primary_is_still_flagged(tmp_path)
     assert any(r["name"] == "diag.log" for r in out["logs"])
     assert len(out["builds_with_missing_logs"]) == 1, out
     assert out["builds_with_missing_logs"][0]["missing"] == ["app.log"]
+    assert "app.log" in out["builds_with_missing_logs"][0]["note"]
+    assert "diag.log" not in out["builds_with_missing_logs"][0]["note"]
 
 
 def test_skip_dirs_from_config_extend_the_defaults(tmp_path):

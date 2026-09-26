@@ -69,7 +69,8 @@ class Logs:
                 yield root_name, base, Path(dirpath), filenames
 
     # A log is only meaningful next to the binary that wrote it, so report both.
-    def _build_note(self, log: Path | None, folder: Path) -> dict:
+    def _build_note(self, log: Path | None, folder: Path, *,
+                    missing: list[str] | tuple[str, ...] = ()) -> dict:
         exe = next((folder / e for e in self.exe_names if (folder / e).exists()), None)
         if exe is None:
             return {"build_exe": None, "note": ""}
@@ -80,8 +81,9 @@ class Logs:
 
         if log is None or not log.exists():
             info["note"] = (
-                f"No {self.names[0]} beside {exe.name}. A binary built before the code "
-                "that writes it never produces one, so this absence means OLD BINARY "
+                f"Missing logs beside {exe.name}: {', '.join(missing if log is None else [log.name])}. "
+                "A binary built before the logging code never produces those files, "
+                "so this absence means OLD BINARY "
                 "or NEVER RAN, not 'the subsystem is silent'. Rebuild and re-run before "
                 "concluding anything from it."
             )
@@ -127,7 +129,7 @@ class Logs:
                     missing.append({
                         "folder": f"{root_name}:{folder.relative_to(base).as_posix()}",
                         "missing": absent,
-                        **self._build_note(None, folder),
+                        **self._build_note(None, folder, missing=absent),
                     })
 
         found.sort(key=lambda r: r["age_s"])
