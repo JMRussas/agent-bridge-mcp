@@ -820,3 +820,16 @@ def test_count_limit_never_removes_pending_mail():
     box.inbox("b")
     box.post("a", "b", "second")
     assert box.history()[0].uid == first.uid
+
+
+def test_ack_survives_restart_and_stale_delivery_cannot_erase_it(tmp_path):
+    from agent_bridge.auth import Principal
+    store = tmp_path / "m.sqlite3"
+    box = Mailbox(store=store)
+    stale = box.post("a", "b", "assignment")
+    acknowledged = box.acknowledge(stale.uid, Principal("b", False))
+    box.mark_read(stale)
+    box.close()
+    again = Mailbox(store=store)
+    assert again.get(stale.uid).acknowledged_at == acknowledged.acknowledged_at
+    assert again.inbox("b") == []

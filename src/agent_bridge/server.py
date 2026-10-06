@@ -30,6 +30,7 @@ import ipaddress
 import logging
 import socket
 import sqlite3
+import json
 from pathlib import Path
 
 import anyio
@@ -261,7 +262,7 @@ def build(cfg: Config):
         return (claimed.strip() or me.name) if me.admin else me.name
 
     @mcp.tool()
-    def bridge_send(to: str, text: str, sender: str = "", thread: str = "") -> dict:
+    def bridge_send(to: str, text: str, sender: str = "", thread: str = "", ack_required: bool = False) -> dict:
         """Send a message to an agent on another machine.
 
         Delivered live to any listener and queued durably, so it is read even if
@@ -272,16 +273,25 @@ def build(cfg: Config):
         """
         me = caller()
         try:
-            msg = box.post(sender_for(me, sender), to, text, thread)
+            msg = box.post(sender_for(me, sender), to, text, thread, ack_required=ack_required, authenticated_principal=me.name, admin=me.admin)
         except ValueError as e:
             return {"error": str(e)}
         except (OSError, sqlite3.Error):
             return {"error": "message persistence failed; send was not accepted"}
         return {"sent": True, "id": msg.id, "to": msg.to, "sender": msg.sender,
+                "uid": msg.uid, "bridge_id": msg.bridge_id, "ack_required": msg.ack_required,
                 "queued_for_recipient": box.unread_count(msg.to)}
 
     @mcp.tool()
-    def bridge_inbox(agent: str = "", limit: int = 20, peek: bool = False, thread: str = "") -> dict:
+    def bridge_ack(message_id: str) -> dict:
+        """Acknowledge durable responsibility for your received message; not completion or acceptance."""
+        try:
+            return {"message": box.acknowledge(message_id, caller()).as_dict()}
+        except (ValueError, Forbidden) as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    def bridge_inbox(agent: str = "", limit: int = 20, peek: bool = False, thread: str = "", ack_mode: bool = False) -> dict:
         """Read your unread messages, marking them read.
 
         `agent` defaults to your authenticated name; another agent's may
@@ -291,13 +301,13 @@ def build(cfg: Config):
             agent = creds.mailbox_for(caller(), agent)
         except Forbidden as e:
             return {"error": str(e)}
-        msgs = box.inbox(agent, limit=limit, peek=peek, thread=thread)
+        msgs = box.inbox(agent, limit=limit, peek=peek or ack_mode, thread=thread)
         return {"agent": agent, "count": len(msgs),
                 "still_unread": box.unread_count(agent),
                 "messages": [m.as_dict() for m in msgs]}
 
     @mcp.tool()
-    async def bridge_wait(agent: str = "", timeout: float = 25.0, peek: bool = False) -> dict:
+    async def bridge_wait(agent: str = "", timeout: float = 25.0, peek: bool = False, ack_mode: bool = False) -> dict:
         """Block until a message arrives for you, or until timeout.
 
         Use this instead of polling bridge_inbox on a timer. It returns the
@@ -313,7 +323,7 @@ def build(cfg: Config):
         except Forbidden as e:
             return {"error": str(e)}
         waited = max(1.0, min(float(timeout), 120.0))
-        msgs, timed_out = await box.wait(agent, waited, peek=peek)
+        msgs, timed_out = await box.wait(agent, waited, peek=peek or ack_mode)
         out = {"agent": agent, "count": len(msgs), "timed_out": timed_out,
                "messages": [m.as_dict() for m in msgs]}
         if timed_out:
@@ -357,7 +367,7 @@ def build(cfg: Config):
         groups: dict[str, list] = {}
         for t in registered:
             group = ("mailbox" if t.name.startswith("bridge_") and
-                     t.name.split("_")[1] in ("send", "inbox", "history", "agents",
+                     t.name.split("_")[1] in ("send", "ack", "inbox", "history", "agents",
                                               "whoami", "capabilities")
                      else "source" if t.name in ("bridge_read", "bridge_grep",
                                                  "bridge_list", "bridge_roots")
@@ -372,6 +382,9 @@ def build(cfg: Config):
         host = f"{cfg.self_name} ({cfg.host}:{cfg.port})"
         me = caller()
         return {
+            "api_version": "1.1",
+            "bridge_id": box.bridge_id,
+            "acknowledgment": {"send": "ack_required=true protects mail from legacy consumption", "receive": "ack_mode=true or ?ack=explicit leaves mail pending", "ack": "bridge_ack(message_id) or POST /api/ack", "json_frames": "/notify?ack=explicit&format=json"},
             "self": cfg.self_name,
             "you": as_json(me),
             "endpoint_host": host,
@@ -545,16 +558,37 @@ def build(cfg: Config):
         body = await request.json()
         try:
             msg = box.post(sender_for(me, str(body.get("sender", ""))), body.get("to", ""),
-                           body.get("text", ""), body.get("thread", ""))
+                           body.get("text", ""), body.get("thread", ""), ack_required=bool(body.get("ack_required", False)), authenticated_principal=me.name, admin=me.admin)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         except (OSError, sqlite3.Error):
             return JSONResponse({"error": "message persistence failed; send was not accepted"}, status_code=503)
-        return JSONResponse({"sent": True, "id": msg.id, "sender": msg.sender})
+        return JSONResponse({"sent": True, "id": msg.id, "uid": msg.uid, "bridge_id": msg.bridge_id, "ack_required": msg.ack_required, "sender": msg.sender})
+
+    async def api_ack(request: Request):
+        body = await request.json()
+        try:
+            return JSONResponse({"message": box.acknowledge(str(body.get("message_id", "")), who(request)).as_dict()})
+        except Forbidden as e:
+            return FORBIDDEN(e)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+
+    async def api_history(request: Request):
+        q = request.query_params
+        me = who(request)
+        try:
+            agent = q.get("agent", "") if me.admin else creds.mailbox_for(me, q.get("agent", ""))
+            limit = max(0, min(int(q.get("limit", 50)), 1000))
+            return JSONResponse({"messages": [m.as_dict() for m in box.history(agent, limit, q.get("thread", ""))]})
+        except Forbidden as e:
+            return FORBIDDEN(e)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
 
     async def api_inbox(request: Request):
         q = request.query_params
-        peek = q.get("peek", "0") not in ("0", "", "false")
+        peek = q.get("peek", "0") not in ("0", "", "false") or q.get("ack") == "explicit"
         try:
             agent = creds.mailbox_for(who(request), q.get("agent", ""))
         except Forbidden as e:
@@ -576,7 +610,7 @@ def build(cfg: Config):
         except Forbidden as e:
             return FORBIDDEN(e)
         waited = max(1.0, min(float(q_params.get("timeout", 25)), 120.0))
-        peek = q_params.get("peek", "0") not in ("0", "", "false")
+        peek = q_params.get("peek", "0") not in ("0", "", "false") or q_params.get("ack") == "explicit"
 
         msgs, timed_out = await box.wait(agent, waited, peek=peek)
         return JSONResponse({"agent": agent, "count": len(msgs), "timed_out": timed_out,
@@ -614,13 +648,19 @@ def build(cfg: Config):
         # never consumed anything, so every reconnect replayed the same backlog -
         # and this server reconnects often. Marking read before sending would be
         # the opposite bug: a send that fails would drop the message silently.
-        backlog = box.inbox(agent, limit=20, peek=True)
+        explicit = ws.query_params.get("ack") == "explicit"
+        json_frames = ws.query_params.get("format") == "json"
+        def frame(m, pending=False):
+            return json.dumps(m.as_dict()) if json_frames else _frame(m, pending=pending)
+        backlog = box.inbox(agent, limit=1000, peek=True)
         sent: list = []
         try:
             for m in backlog:
-                await ws.send_text(_frame(m, pending=True))
+                await ws.send_text(frame(m, pending=True))
+                box.delivered(m.id, me.name, "websocket")
                 sent.append(m)
-            box.mark_read(*sent)
+            if not explicit:
+                box.mark_read(*sent)
             # No application-level keepalive on purpose. Every text frame this
             # socket sends becomes a notification in the listening agent's
             # session, so a heartbeat would interrupt it on a timer for no
@@ -634,8 +674,9 @@ def build(cfg: Config):
             # must not eat another agent's inbox.
             while True:
                 m = await q.get()
-                await ws.send_text(_frame(m))
-                if m.to == agent:
+                await ws.send_text(frame(m))
+                box.delivered(m.id, me.name, "websocket")
+                if m.to == agent and not explicit:
                     box.mark_read(m)
         except (WebSocketDisconnect, RuntimeError):
             pass
@@ -663,6 +704,8 @@ def build(cfg: Config):
     app.routes.append(WebSocketRoute("/notify", notify))
     app.routes.append(Route("/api/health", health, methods=["GET"]))
     app.routes.append(Route("/api/send", api_send, methods=["POST"]))
+    app.routes.append(Route("/api/ack", api_ack, methods=["POST"]))
+    app.routes.append(Route("/api/history", api_history, methods=["GET"]))
     app.routes.append(Route("/api/inbox", api_inbox, methods=["GET"]))
     app.routes.append(Route("/api/agents", api_agents, methods=["GET"]))
     app.routes.append(Route("/api/wait", api_wait, methods=["GET"]))
@@ -685,7 +728,8 @@ def _bearer_from_subprotocols(ws) -> str:
 def _frame(msg, pending: bool = False) -> str:
     # One line of prose first: whatever consumes this shows the frame to a human
     # or to a model, and a bare JSON blob buries the actual question.
-    head = f"[bridge] {msg.sender} -> {msg.to}"
+    marker = f"[operator {msg.authenticated_principal} acting as {msg.sender}] " if msg.impersonated else ""
+    head = marker + f"[bridge] {msg.sender} -> {msg.to}"
     if msg.thread:
         head += f" ({msg.thread})"
     if pending:

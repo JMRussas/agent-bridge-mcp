@@ -238,3 +238,35 @@ def test_a_clean_shutdown_flushes_the_coalesced_read_state(tmp_path: Path):
         assert Mailbox(store=store).unread_count("x") == 1
     # Leaving the context runs the lifespan shutdown, which must flush it.
     assert Mailbox(store=store).unread_count("x") == 0
+
+
+def test_explicit_socket_delivery_replays_until_authorized_ack(peered):
+    sent = peered.post("/api/send", json={"to": "sisyphus", "text": "durable", "ack_required": True}, headers=BEARER).json()
+    for _ in range(2):
+        with peered.websocket_connect("/notify?ack=explicit&format=json", headers=AS_PEER) as ws:
+            message = ws.receive_json()
+            assert message["uid"] == sent["uid"]
+    # Even a legacy consuming inbox cannot consume ack-required assignments.
+    assert peered.get("/api/inbox", headers=AS_PEER).json()["count"] == 1
+    first = peered.post("/api/ack", json={"message_id": sent["uid"]}, headers=AS_PEER).json()["message"]
+    second = peered.post("/api/ack", json={"message_id": str(sent["id"])}, headers=AS_PEER).json()["message"]
+    assert first["acknowledged_at"] == second["acknowledged_at"]
+    assert peered.get("/api/inbox", headers=AS_PEER).json()["count"] == 0
+    assert peered.get("/api/history", headers=AS_PEER).json()["messages"][0]["uid"] == sent["uid"]
+
+
+def test_ack_and_history_do_not_cross_role_boundary(peered):
+    sent = peered.post("/api/send", json={"to": "other", "text": "private", "ack_required": True}, headers=BEARER).json()
+    assert peered.post("/api/ack", json={"message_id": sent["uid"]}, headers=AS_PEER).status_code == 403
+    assert peered.get("/api/history?agent=other", headers=AS_PEER).status_code == 403
+    assert peered.get("/api/history", headers=AS_PEER).json()["messages"] == []
+
+
+def test_provenance_distinguishes_operator_impersonation(peered):
+    peered.post("/api/send", json={"sender": "lead", "to": "sisyphus", "text": "operator"}, headers=BEARER)
+    peered.post("/api/send", json={"sender": "lead", "to": "sisyphus", "text": "agent"}, headers=AS_PEER)
+    rows = peered.get("/api/history", headers=AS_PEER).json()["messages"]
+    assert rows[0]["sender"] == "lead" and rows[0]["authenticated_principal"] == "here"
+    assert rows[0]["admin"] and rows[0]["impersonated"]
+    assert rows[1]["sender"] == rows[1]["authenticated_principal"] == "sisyphus"
+    assert not rows[1]["admin"] and not rows[1]["impersonated"]

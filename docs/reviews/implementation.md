@@ -28,3 +28,19 @@ Review: corrupt JSON and failed writes must fail explicitly; migration must
 preserve IDs; database artifacts must not bypass per-role read boundaries.
 Checks cover transactional send failure, one-time migration, stable identifiers,
 pending pressure, restart, and existing HTTP/MCP behavior.
+
+## Step 2: acknowledgment and provenance
+
+`ack_required=true` on send prevents every legacy consumer from clearing the
+message. Receivers may additionally opt into `ack_mode=true` on MCP inbox/wait,
+or `?ack=explicit` on REST inbox/wait and WebSocket. `/notify?format=json` provides
+structured frames. `bridge_ack(message_id)` / `POST /api/ack {message_id}` accept
+UUIDs or legacy IDs and are recipient/operator-only and idempotent. REST history
+now matches MCP history authorization. Server-stamped principal/admin/impersonation
+fields distinguish operator messages; imported messages have unknown provenance.
+
+Review fixed stale socket objects potentially overwriting acknowledgment state.
+Tests cover reconnect replay, legacy consumer protection, restart, idempotence,
+and cross-role denial. Delivery events mean socket writes, not model observation;
+consumed events retain the legacy semantics. Acknowledgment means responsibility,
+not completion, verification, or acceptance.

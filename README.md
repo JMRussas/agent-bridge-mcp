@@ -63,7 +63,11 @@ Storage and migration failures are explicit errors.
 
 Legacy inbox reads and successful `/notify` writes still consume mail. A socket
 write proves transport delivery, not model observation. Use history to recover
-context; explicit acknowledgment mode is introduced in the next protocol stage.
+context. Send `ack_required=true` to protect assignments from consumption until
+`bridge_ack(message_id)` or `POST /api/ack {"message_id": "<uid>"}` succeeds.
+Receivers can use `ack_mode=true` on MCP inbox/wait or `?ack=explicit` on REST
+and WebSocket. `/notify?ack=explicit&format=json` provides structured frames.
+Acknowledgment accepts responsibility; it does not prove completion or acceptance.
 
 Containment is the design rather than a wrapper: paths are resolved *before*
 they are range-checked against the roots, and the exec allowlist is keyed by

@@ -42,6 +42,11 @@ class Message:
     read: bool = False
     meta: dict = field(default_factory=dict)
 
+    ack_required: bool = False
+    acknowledged_at: float | None = None
+    authenticated_principal: str = ""
+    admin: bool = False
+    impersonated: bool = False
     uid: str = ""
     bridge_id: str = ""
 
@@ -85,6 +90,8 @@ class Mailbox:
         with self.db:
             self.db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT UNIQUE NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, thread TEXT NOT NULL, ts REAL NOT NULL, read INTEGER NOT NULL, payload TEXT NOT NULL)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL, kind TEXT NOT NULL, ts REAL NOT NULL, actor TEXT NOT NULL, data TEXT NOT NULL)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS events_message ON events(message_id,id)")
             self.db.execute("CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient,read,id)")
             self.db.execute("CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread,id)")
             self.db.execute("INSERT OR IGNORE INTO settings VALUES ('bridge_id', ?)", (str(uuid.uuid4()),))
@@ -123,6 +130,7 @@ class Mailbox:
             with self.db:
                 for m in self._dirty.values():
                     self.db.execute("UPDATE messages SET read=?,payload=? WHERE id=?", (int(m.read), json.dumps(asdict(m)), m.id))
+                    self._event(m.id, "consumed", m.to, {"mode": "legacy"})
                 self.db.execute("INSERT INTO settings VALUES ('seen', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(self._seen),))
             self._dirty.clear()
 
@@ -144,7 +152,8 @@ class Mailbox:
     def bytes_used(self) -> int:
         return sum(_size(m.text) for m in self.history(limit=2147483647))
 
-    def post(self, sender: str, to: str, text: str, thread: str = "", meta: dict | None = None) -> Message:
+    def post(self, sender: str, to: str, text: str, thread: str = "", meta: dict | None = None, *, ack_required: bool = False,
+             authenticated_principal: str = "", admin: bool = False) -> Message:
         sender = (sender or "unknown").strip().lower()
         to = (to or "").strip().lower()
         if not to:
@@ -163,14 +172,45 @@ class Mailbox:
             if len(pending) >= self._capacity or sum(_size(m.text) for m in pending) + size > self._max_bytes:
                 raise ValueError("pending mailbox capacity exceeded; acknowledge pending mail before sending more")
             m = Message(id=0, ts=time.time(), sender=sender, to=to, text=text,
-                        thread=thread, meta=meta or {}, uid=str(uuid.uuid4()), bridge_id=self.bridge_id)
+                        thread=thread, meta=meta or {}, ack_required=ack_required,
+                        authenticated_principal=authenticated_principal, admin=admin,
+                        impersonated=bool(admin and authenticated_principal != sender), uid=str(uuid.uuid4()), bridge_id=self.bridge_id)
             with self.db:
                 self._insert(m)
                 m.id = self.db.execute("SELECT last_insert_rowid()").fetchone()[0]
                 self.db.execute("UPDATE messages SET payload=? WHERE id=?", (json.dumps(asdict(m)), m.id))
+                self._event(m.id, "sent", authenticated_principal or sender, {})
             self._seen[sender] = m.ts
         self._fanout(m)
         return m
+
+    def get(self, reference: str | int) -> Message:
+        rows = self._rows("SELECT payload FROM messages WHERE uid=? OR CAST(id AS TEXT)=?", (str(reference), str(reference)))
+        if not rows:
+            raise ValueError("unknown message")
+        return rows[0]
+
+    def _event(self, message_id: int, kind: str, actor: str, data: dict) -> None:
+        self.db.execute("INSERT INTO events(message_id,kind,ts,actor,data) VALUES (?,?,?,?,?)", (message_id, kind, time.time(), actor, json.dumps(data)))
+
+    def delivered(self, reference: str | int, actor: str, transport: str) -> None:
+        with self._lock, self.db:
+            self._event(self.get(reference).id, "delivered", actor, {"transport": transport})
+
+    def acknowledge(self, reference: str | int, principal) -> Message:
+        with self._lock:
+            m = self.get(reference)
+            if not principal.may_read(m.to):
+                from agent_bridge.auth import Forbidden
+                raise Forbidden("only the recipient or operator may acknowledge this message")
+            self._persist()
+            if m.acknowledged_at is None:
+                m.acknowledged_at = time.time()
+                m.read = True
+                with self.db:
+                    self.db.execute("UPDATE messages SET read=1,payload=? WHERE id=?", (json.dumps(asdict(m)), m.id))
+                    self._event(m.id, "acknowledged", principal.name, {})
+            return m
 
     def _fanout(self, msg: Message) -> None:
         for q in self._subs.get(msg.to, []) + self._subs.get("*", []):
@@ -257,11 +297,16 @@ class Mailbox:
     # wire, in one write. Marking before the send would drop a message whose
     # send failed; never marking meant every reconnect replayed it.
     def mark_read(self, *msgs: Message) -> None:
-        for m in msgs:
-            m.read = True
-            self._dirty[m.id] = m
-        if msgs:
-            self._persist_soon()
+        with self._lock:
+            for m in msgs:
+                current = self.get(m.id)
+                if current.ack_required or current.read:
+                    continue
+                current.read = True
+                m.read = True
+                self._dirty[m.id] = current
+            if self._dirty:
+                self._persist_soon()
 
     def unsubscribe(self, agent: str, q: asyncio.Queue) -> None:
         agent = (agent or "*").strip().lower()
