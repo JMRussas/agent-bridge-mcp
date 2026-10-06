@@ -63,3 +63,22 @@ artifact; reopening or subsequent changes require fresh verification.
 Review fixed metadata session spoofing and acceptance of stale or different
 artifacts. Unit and REST tests cover the assignment-to-review flow, role boundaries,
 restart persistence, malformed registration, and exact-artifact acceptance.
+
+## Step 4: telemetry and reviewed learnings
+
+Reports use only caller-visible messages. They define pending mail, overdue
+ack-required mail (not proof of failure), send-to-ack/completion/acceptance times,
+identical normalized reported blocker counts, reopenings, and event counts.
+Inbox/wait responses record offers separately from socket writes and explicit
+acknowledgments. Historical imports have no reconstructed delivery telemetry.
+
+Learning proposals require retained supporting messages and evidence references;
+contradicting messages are preserved. Reviews append evidence-backed decisions
+without rewriting candidates. All source messages must be visible to the caller.
+Current source outcomes are included; reopening source work after an accepted
+review marks the learning needs_revision. Extraction is an explicit candidate
+proposal API, not an unattended model invocation or automatic truth assessment.
+
+Review fixed annotation shadowing and stale learning acceptance. Tests cover
+metric definitions, privacy, persistence, contradictory evidence, revalidation,
+nonfinite thresholds, and REST proposal/review flow.

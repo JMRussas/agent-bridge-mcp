@@ -193,6 +193,11 @@ class Mailbox:
     def _event(self, message_id: int, kind: str, actor: str, data: dict) -> None:
         self.db.execute("INSERT INTO events(message_id,kind,ts,actor,data) VALUES (?,?,?,?,?)", (message_id, kind, time.time(), actor, json.dumps(data)))
 
+    def offered(self, messages: list[Message], actor: str, transport: str) -> None:
+        with self._lock, self.db:
+            for m in messages:
+                self._event(m.id, "offered", actor, {"transport": transport})
+
     def delivered(self, reference: str | int, actor: str, transport: str) -> None:
         with self._lock, self.db:
             self._event(self.get(reference).id, "delivered", actor, {"transport": transport})

@@ -288,3 +288,15 @@ def test_session_reference_cannot_be_spoofed_in_metadata(peered):
     session = peered.post("/api/sessions", json={"context": {"harness": "test", "conversation_ref": "operator:private"}}, headers=BEARER).json()["result"]
     assert peered.post("/api/send", json={"to": "x", "text": "hi", "session_id": session["id"]}, headers=AS_PEER).status_code == 403
     assert peered.post("/api/send", json={"to": "x", "text": "hi", "meta": {"session_id": session["id"]}}, headers=AS_PEER).status_code == 400
+
+
+def test_telemetry_and_reviewed_learning_rest(peered):
+    sent = peered.post("/api/send", json={"to": "sisyphus", "text": "fix", "ack_required": True}, headers=BEARER).json()
+    candidate = peered.post("/api/learnings", json={"text": "Build before judging logs", "message_ids": [sent["uid"]], "evidence_refs": ["test:1"]}, headers=AS_PEER).json()["result"]
+    assert candidate["status"] == "candidate"
+    reviewed = peered.post("/api/learning-reviews", json={"learning_id": candidate["id"], "status": "accepted", "evidence_refs": ["review:1"]}, headers=BEARER).json()["result"]
+    assert reviewed["status"] == "accepted"
+    assert peered.get("/api/learnings", headers=AS_PEER).json()["result"][0]["id"] == candidate["id"]
+    metrics = peered.get("/api/telemetry", headers=AS_PEER).json()["result"]
+    assert metrics["messages"] == 1 and metrics["pending"] == [sent["uid"]]
+    assert peered.get("/api/telemetry?overdue_after_s=nan", headers=AS_PEER).status_code == 400

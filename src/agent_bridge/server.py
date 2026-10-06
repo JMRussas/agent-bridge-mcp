@@ -47,6 +47,7 @@ from agent_bridge.auth import PLACEHOLDER_TOKENS, Credentials, Forbidden, Princi
 from agent_bridge.config import Config
 from agent_bridge.execute import ExecDenied, Runner
 from agent_bridge.evidence import Evidence, bounded
+from agent_bridge.reports import Reports
 from agent_bridge.files import Files, PathDenied
 from agent_bridge.logs import Logs
 from agent_bridge.mailbox import Mailbox
@@ -174,6 +175,7 @@ def build(cfg: Config):
                   max_bytes=int(cfg.mailbox_max_bytes),
                   debounce_s=float(cfg.mailbox_debounce_s))
     evidence = Evidence(box)
+    reports = Reports(evidence)
     files = Files(cfg.roots, int(cfg.max_read_bytes), ripgrep=cfg.ripgrep_path)
     if box._store:
         files.deny_names.update({box._store.name, box._store.name + "-wal", box._store.name + "-shm"})
@@ -275,6 +277,26 @@ def build(cfg: Config):
         """Inspect an assignment's retained message, links, outcomes, and delivery events."""
         return evidence_result(evidence.inspect, caller(), message_id)
 
+    @mcp.tool()
+    def bridge_telemetry(overdue_after_s: float = 3600) -> dict:
+        """Report pending mail, explicit response durations, repeated reported blockers, and reopenings in your visible traffic."""
+        return evidence_result(reports.telemetry, caller(), overdue_after_s)
+
+    @mcp.tool()
+    def bridge_propose_learning(text: str, message_ids: list[str], evidence_refs: list[str], contradicting_message_ids: list[str] | None = None) -> dict:
+        """Propose a candidate learning with retained supporting/contradicting messages and external evidence."""
+        return evidence_result(reports.propose, caller(), text, message_ids, evidence_refs, contradicting_message_ids)
+
+    @mcp.tool()
+    def bridge_learnings() -> dict:
+        """List learning candidates and reviews whose full message evidence you may access."""
+        return evidence_result(reports.list, caller())
+
+    @mcp.tool()
+    def bridge_review_learning(learning_id: str, status: str, evidence_refs: list[str], note: str = "") -> dict:
+        """Append an evidence-backed accepted/rejected/needs_revision review without rewriting the candidate."""
+        return evidence_result(reports.review, caller(), learning_id, status, evidence_refs, note)
+
     # --- mailbox -----------------------------------------------------------
 
     @mcp.tool()
@@ -343,6 +365,7 @@ def build(cfg: Config):
         except Forbidden as e:
             return {"error": str(e)}
         msgs = box.inbox(agent, limit=limit, peek=peek or ack_mode, thread=thread)
+        box.offered(msgs, caller().name, "mcp_inbox")
         return {"agent": agent, "count": len(msgs),
                 "still_unread": box.unread_count(agent),
                 "messages": [m.as_dict() for m in msgs]}
@@ -365,6 +388,7 @@ def build(cfg: Config):
             return {"error": str(e)}
         waited = max(1.0, min(float(timeout), 120.0))
         msgs, timed_out = await box.wait(agent, waited, peek=peek or ack_mode)
+        box.offered(msgs, caller().name, "mcp_wait")
         out = {"agent": agent, "count": len(msgs), "timed_out": timed_out,
                "messages": [m.as_dict() for m in msgs]}
         if timed_out:
@@ -616,6 +640,25 @@ def build(cfg: Config):
             return JSONResponse({"error": "message persistence failed; send was not accepted"}, status_code=503)
         return JSONResponse({"sent": True, "id": msg.id, "uid": msg.uid, "bridge_id": msg.bridge_id, "ack_required": msg.ack_required, "sender": msg.sender})
 
+    async def api_reports(request: Request):
+        try:
+            me = who(request)
+            if request.method == "GET":
+                result = reports.telemetry(me, float(request.query_params.get("overdue_after_s", 3600))) if request.url.path.endswith("telemetry") else reports.list(me)
+            else:
+                body = bounded(await request.json())
+                if request.url.path.endswith("learning-reviews"):
+                    result = reports.review(me, body["learning_id"], body["status"], body["evidence_refs"], body.get("note", ""))
+                else:
+                    result = reports.propose(me, body["text"], body["message_ids"], body["evidence_refs"], body.get("contradicting_message_ids"))
+            return JSONResponse({"result": result})
+        except Forbidden as e:
+            return FORBIDDEN(e)
+        except (ValueError, KeyError, TypeError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except (OSError, sqlite3.Error):
+            return JSONResponse({"error": "report persistence failed"}, status_code=503)
+
     async def api_evidence_write(request: Request):
         try:
             body = bounded(await request.json())
@@ -673,6 +716,7 @@ def build(cfg: Config):
         except Forbidden as e:
             return FORBIDDEN(e)
         msgs = box.inbox(agent, int(q.get("limit", 20)), peek, q.get("thread", ""))
+        box.offered(msgs, who(request).name, "rest_inbox")
         return JSONResponse({"agent": agent, "count": len(msgs),
                              "messages": [m.as_dict() for m in msgs]})
 
@@ -692,6 +736,7 @@ def build(cfg: Config):
         peek = q_params.get("peek", "0") not in ("0", "", "false") or q_params.get("ack") == "explicit"
 
         msgs, timed_out = await box.wait(agent, waited, peek=peek)
+        box.offered(msgs, who(request).name, "rest_wait")
         return JSONResponse({"agent": agent, "count": len(msgs), "timed_out": timed_out,
                              "messages": [m.as_dict() for m in msgs]})
 
@@ -779,9 +824,14 @@ def build(cfg: Config):
 
     app.router.lifespan_context = lifespan
 
+    app.state.reports = reports
     app.state.evidence = evidence
     app.state.mailbox = box
     app.state.mcp = mcp                      # so a test can list what got registered
+    for path in ("telemetry", "learnings"):
+        app.routes.append(Route("/api/" + path, api_reports, methods=["GET"]))
+    for path in ("learnings", "learning-reviews"):
+        app.routes.append(Route("/api/" + path, api_reports, methods=["POST"]))
     for path in ("sessions", "links", "outcomes"):
         app.routes.append(Route("/api/" + path, api_evidence_write, methods=["POST"]))
     for path in ("sessions", "evidence"):
