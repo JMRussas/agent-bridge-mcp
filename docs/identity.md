@@ -92,8 +92,9 @@ server, keep the middleware and record why.
 
 ## Delivery semantics
 
-A mailbox is consumed by its reader: `bridge_inbox` marks read, and a frame
-written to a `/notify` socket under the addressee's own name is consumed. With
+In legacy mode a mailbox is consumed by its reader: `bridge_inbox` marks read, and a frame
+written to a `/notify` socket under the addressee's own name is consumed. Ack-required messages remain pending until explicit recipient acknowledgment;
+see [wire.md](wire.md). With
 one session per role that is the obvious behaviour. With several instances of
 one role — three `agent-a` terminals — the question "who gets a message to
 `agent-a`?" has three standard answers, and the design supports all three

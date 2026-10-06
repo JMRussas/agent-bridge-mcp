@@ -82,3 +82,44 @@ proposal API, not an unattended model invocation or automatic truth assessment.
 Review fixed annotation shadowing and stale learning acceptance. Tests cover
 metric definitions, privacy, persistence, contradictory evidence, revalidation,
 nonfinite thresholds, and REST proposal/review flow.
+
+
+## Step 5: advisory ownership and supervised wake-up
+
+Leases resolve configured-root/worktree paths and aliases before conservative
+case-insensitive overlap checks. Acquisition is transactional and rejects conflicts
+with named holders. Owners/operator can renew/release; expired claims require
+reacquisition. Shared ownership metadata is visible to authenticated roles; no
+filesystem fencing or automatic merge acceptance is introduced.
+
+The opt-in worker long-polls outside the model, uses explicit argv/stdin, persists
+results before ack, and binds its state to bridge/role/worktree/harness. Server-side
+claims prevent competing workers; a cross-platform local lock protects one state
+directory. Process launch, known failure, retained result, and acknowledgment are
+separate evidence. Interrupted/timeout/output-storage failures are uncertain;
+operator inspection/reset and explicit local recovery are required. Known process
+failures have a bounded retry count. Neither process exit nor registration attests
+a model or grants approval.
+
+Final review fixes: Windows locked-byte reads; delayed legacy read overwriting
+another connection's ack; concurrent ack timestamp races; failed output persistence
+causing reexecution; missing reverse link lookup; source/grep access to database and
+configuration backup artifacts; larger reports blocking the event loop; mismatched
+worker state; idempotent completion handoffs. Runtime result events retain immutable
+successful completion rather than recording each ack retry as a new completion.
+
+Validation uses Windows Python and real subprocesses against an isolated bridge,
+plus real MCP transport identity tests. Installed Codex CLI help and official
+OpenAI noninteractive-execution documentation were inspected using OpenAI Docs.
+No authenticated model turn, idle IDE injection, running-service restart, or live
+mailbox migration was performed. Deployment is an explicit operational step using
+these committed changes; existing machine-specific config and backups are untouched.
+
+The cross-step review also added strict send validation, indexed UUID/legacy-ID
+lookup, bounded report history batches, and a real-MCP slow-report responsiveness
+check. Socket event data distinguishes recipient listeners from wildcard observers.
+
+Final validation: 194 tests passed, 3 skipped (ripgrep unavailable on the Windows
+PATH and Windows symlink creation unavailable). Python compilation, worker CLI
+help, and diff whitespace checks passed. Each stage was reviewed, corrected, and
+committed separately; no external publication or production rollout is included.

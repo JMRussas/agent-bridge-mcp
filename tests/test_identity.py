@@ -186,3 +186,38 @@ def test_mailbox_for_defaults_to_self_and_refuses_others():
     assert c.mailbox_for(admin, "") == "here"
     assert c.mailbox_for(admin, "b") == "b"
     assert c.mailbox_for(admin, "*") == "*"
+
+
+async def test_evidence_protocol_preserves_real_mcp_identity(mcp_url):
+    session = (await call(mcp_url, PEER_A, "bridge_register_session", context={"harness": "test", "conversation_ref": "conversation:a"}))["result"]
+    assert session["owner"] == "a"
+    sent = await call(mcp_url, PEER_A, "bridge_send", to="b", text="assignment", ack_required=True, session_id=session["id"])
+    assert (await call(mcp_url, PEER_B, "bridge_inbox"))["count"] == 1
+    assert "error" in await call(mcp_url, PEER_A, "bridge_ack", message_id=sent["uid"])
+    await call(mcp_url, PEER_B, "bridge_ack", message_id=sent["uid"])
+    await call(mcp_url, PEER_B, "bridge_link", message_id=sent["uid"], relation="followed_up_in", target_type="checkin", target_ref="checkin:1")
+    await call(mcp_url, PEER_B, "bridge_outcome", message_id=sent["uid"], kind="verified", artifact_ref="commit:1", evidence_refs=["test:1"])
+    denied = await call(mcp_url, PEER_B, "bridge_outcome", message_id=sent["uid"], kind="accepted", artifact_ref="commit:1", evidence_refs=["review:1"])
+    assert "error" in denied
+    accepted = await call(mcp_url, PEER_A, "bridge_outcome", message_id=sent["uid"], kind="accepted", artifact_ref="commit:1", evidence_refs=["review:1"])
+    assert accepted["result"]["actor"] == "a"
+    assert (await call(mcp_url, PEER_B, "bridge_links", target_type="checkin", target_ref="checkin:1"))["result"][0]["message_id"] == sent["uid"]
+    metrics = (await call(mcp_url, PEER_B, "bridge_telemetry"))["result"]
+    assert metrics["pending"] == [] and metrics["durations_s"]["acknowledgment"]["samples"] == 1
+
+
+async def test_slow_report_does_not_block_mail_delivery(mcp_url, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    def slow_report(self, who, overdue_after_s=3600):
+        started.set()
+        release.wait(5)
+        return {"messages": 0}
+    monkeypatch.setattr("agent_bridge.reports.Reports.telemetry", slow_report)
+    task = asyncio.create_task(call(mcp_url, PEER_A, "bridge_telemetry"))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        sent = await asyncio.wait_for(call(mcp_url, PEER_B, "bridge_send", to="a", text="still responsive"), 2)
+        assert sent["sent"] and not task.done()
+    finally:
+        release.set()
+        await task

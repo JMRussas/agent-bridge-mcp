@@ -1,5 +1,20 @@
 # agent-bridge-mcp roadmap
 
+## October 6 reliability and evidence update
+
+The implementation in [wire.md](wire.md) and [wake.md](wake.md) adds retained
+SQLite history and one-time JSON migration, explicit acknowledgments, authenticated
+sender provenance, role-owned session context, typed conversation/check-in links,
+artifact-specific outcomes, telemetry, reviewed learning candidates, advisory path
+leases, and an opt-in external worker with durable exclusive claims. This supersedes
+older descriptions of bounded history and consuming-only delivery below.
+
+P3 storage and L5 advisories are implemented. REST history from U0 is implemented;
+observer credentials remain outstanding. The supervised worker is a wake path for
+configured executable harnesses, not universal IDE injection or filesystem fencing.
+See [the step reviews](reviews/implementation.md) for validation and limitations.
+
+
 A backlog, not a spec. Stories are sized S/M/L (hours / a day / several days),
 ordered within a sprint by value, and each one is meant to be a single PR with
 a test. Tick the box in the PR that closes it; move stories between sprints
@@ -277,7 +292,7 @@ not what it is.
   under `deploy/`, and a `--pid-file` flag so the port-owner trick in
   `bridge.ps1` has an equivalent elsewhere.
 
-- [ ] **P3 SQLite mailbox** (M)
+- [ ] **P3 SQLite mailbox** — storage/migration shipped October 6; FTS remains. (M)
   Replaces the JSON store. Byte-based retention, FTS on text, one write per
   post rather than a whole-file rewrite. Migration reads `mailbox.json`
   once. (Per-session read receipts were here; S1b's instances are the
@@ -392,7 +407,7 @@ untrusted text in the system.
   accept A2A tasks, keep MCP for tools. *Decide once the ecosystem's clients
   actually speak it; do not lead with this.*
 - [ ] **L4 rate limits** (S) — per-peer token bucket on `post` and `bridge_run`.
-- [ ] **L5 file-lease advisories** — "I am editing X" claims like MCP Agent
+- [x] **L5 file-lease advisories** — "I am editing X" claims like MCP Agent
   Mail. Only if two agents start editing the *same* tree through this.
 
 ---

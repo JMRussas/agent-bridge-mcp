@@ -31,7 +31,8 @@ DENY_PARTS = {".git", "node_modules", "obj", "bin", ".venv", "__pycache__", ".vs
 # mailbox.json is every message this bridge has carried; a root that happens
 # to contain the bridge's own checkout must not turn bridge_read into a way
 # around the per-agent mailbox boundary.
-DENY_NAMES = {".env", ".credentials.json", "config.json", "mailbox.json", "mailbox.sqlite3", "mailbox.sqlite3-wal", "mailbox.sqlite3-shm", "id_rsa", ".npmrc"}
+DENY_PATTERNS = {"config.json.bridge-backup-*", "mailbox.json.*", "*.sqlite3-wal", "*.sqlite3-shm"}
+DENY_NAMES = {".env", ".credentials.json", "config.json", "mailbox.json", "mailbox.sqlite3", "worker.sqlite3", "mailbox.sqlite3-wal", "mailbox.sqlite3-shm", "id_rsa", ".npmrc"}
 
 # Only used by the Python grep fallback: art, binaries and compiled assets are
 # most of the bytes in these trees and none of the answers.
@@ -124,13 +125,17 @@ class Files:
                 f"Roots: {', '.join(f'{k} -> {v}' for k, v in self.roots.items())}"
             )
 
-        if self.deny_names & {target.name} or DENY_PARTS & set(p.name for p in target.parents):
+        if self._denied_name(target.name) or DENY_PARTS & set(p.name for p in target.parents):
             raise PathDenied(f"path is on the deny list: {target}")
         return target
 
+    def _denied_name(self, name: str) -> bool:
+        name = name.casefold()
+        return name in {n.casefold() for n in self.deny_names} or any(fnmatch(name, pattern) for pattern in DENY_PATTERNS)
+
     def _skip(self, p: Path) -> bool:
         parts = set(p.parts)
-        return bool(parts & DENY_PARTS) or p.name in self.deny_names
+        return bool(parts & DENY_PARTS) or self._denied_name(p.name)
 
     def list(self, root: str = "", glob: str = "**/*", limit: int = 200) -> dict:
         bases = ([self.roots[root.lower()]] if root and root.lower() in self.roots
@@ -257,6 +262,8 @@ class Files:
             args += ["--glob", glob]
         for part in DENY_PARTS:
             args += ["--glob", f"!**/{part}/**"]
+        for name in self.deny_names | DENY_PATTERNS:
+            args += ["--iglob", f"!**/{name}"]
         args += ["--regexp", pattern, *[str(b) for b in bases]]
 
         proc = await asyncio.create_subprocess_exec(
@@ -353,6 +360,6 @@ class Files:
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames[:] = [d for d in dirnames if d not in DENY_PARTS]
             for fn in filenames:
-                if fn in self.deny_names or Path(fn).suffix.lower() in BINARY_SUFFIXES:
+                if self._denied_name(fn) or Path(fn).suffix.lower() in BINARY_SUFFIXES:
                     continue
                 yield Path(dirpath) / fn

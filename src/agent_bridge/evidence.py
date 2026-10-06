@@ -104,6 +104,23 @@ class Evidence:
                 self.db.execute("INSERT INTO links VALUES (?,?,?,?)", (item["id"], m.id, item["ts"], json.dumps(item)))
             return item
 
+    def find_links(self, who: Principal, target_type: str, target_ref: str) -> list[dict]:
+        if target_type not in TARGETS:
+            raise ValueError("unknown target type")
+        reference(target_ref, "target_ref")
+        with self.box._lock:
+            out = []
+            for row in self.db.execute("SELECT payload FROM links ORDER BY ts"):
+                item = json.loads(row[0])
+                if item["target_type"] != target_type or item["target_ref"] != target_ref:
+                    continue
+                try:
+                    self.message(who, item["message_id"])
+                except Forbidden:
+                    continue
+                out.append(item)
+            return out
+
     def outcome(self, who: Principal, message_id: str, kind: str, artifact_ref: str = "",
                 evidence_refs: list[str] | None = None, details: dict | None = None) -> dict:
         if kind not in OUTCOMES:

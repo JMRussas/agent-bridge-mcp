@@ -21,40 +21,55 @@ class Reports:
             self.db.execute("CREATE TABLE IF NOT EXISTS learnings (id TEXT PRIMARY KEY, ts REAL NOT NULL, payload TEXT NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS learning_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, learning_id TEXT NOT NULL, ts REAL NOT NULL, payload TEXT NOT NULL)")
 
+    def visible_messages(self, who):
+        # Bounded queries avoid holding the connection lock over a full history
+        # decode. Later messages belong to a subsequent report.
+        with self.box._lock:
+            upper = self.db.execute("SELECT coalesce(max(id),0) FROM messages").fetchone()[0]
+        after = 0
+        while True:
+            with self.box._lock:
+                rows = self.db.execute("SELECT id,sender,recipient FROM messages WHERE id>? AND id<=? ORDER BY id LIMIT 200", (after, upper)).fetchall()
+            if not rows:
+                return
+            for message_id, sender, recipient in rows:
+                if who.may_read(sender) or who.may_read(recipient):
+                    yield self.box.get(message_id)
+            after = rows[-1][0]
+
     def telemetry(self, who, overdue_after_s: float = 3600) -> dict:
         if not isinstance(overdue_after_s, (int, float)) or not math.isfinite(overdue_after_s) or overdue_after_s <= 0:
             raise ValueError("overdue_after_s must be finite and positive")
-        with self.box._lock:
-            messages = [m for m in self.box.history(limit=2147483647) if who.may_read(m.sender) or who.may_read(m.to)]
-            pending, overdue, reopened = [], [], []
-            blockers = Counter()
-            intervals = {"acknowledgment": [], "completion": [], "acceptance": []}
-            events = Counter()
-            for m in messages:
-                record = self.evidence.inspect(who, m.uid)
-                if not m.read:
-                    pending.append(m.uid)
-                    if m.ack_required and time.time() - m.ts >= overdue_after_s:
-                        overdue.append(m.uid)
-                if m.acknowledged_at is not None:
-                    intervals["acknowledgment"].append(max(0, m.acknowledged_at - m.ts))
-                for kind, label in (("completed", "completion"), ("accepted", "acceptance")):
-                    outcome = next((o for o in record["outcomes"] if o["kind"] == kind), None)
-                    if outcome:
-                        intervals[label].append(max(0, outcome["ts"] - m.ts))
-                for o in record["outcomes"]:
-                    if o["kind"] == "blocked":
-                        reason = o["details"].get("reason", "unspecified")
-                        if isinstance(reason, str):
-                            blockers[" ".join(reason.split()).casefold()] += 1
-                    if o["kind"] == "reopened":
-                        reopened.append(m.uid)
-                events.update(e["kind"] for e in record["events"])
-            return {"scope": "messages visible to the caller", "messages": len(messages),
-                    "pending": pending, "overdue_unacknowledged": overdue, "overdue_after_s": overdue_after_s,
-                    "reopened_messages": sorted(set(reopened)), "blockers": dict(blockers), "events": dict(events),
-                    "durations_s": {k: {"samples": len(v), "mean": sum(v) / len(v) if v else None, "max": max(v) if v else None} for k, v in intervals.items()},
-                    "definitions": {"pending": "not consumed or explicitly acknowledged", "overdue_unacknowledged": "pending ack-required mail older than the chosen threshold; not proof of failure", "durations": "send to explicit acknowledgment or first recorded completion/acceptance", "blockers": "counts of identical normalized reported reasons; no inferred cause", "delivered": "socket write, not model observation", "offered": "inbox/wait response prepared; not proof of receipt"}}
+        messages = list(self.visible_messages(who))
+        pending, overdue, reopened = [], [], []
+        blockers = Counter()
+        intervals = {"acknowledgment": [], "completion": [], "acceptance": []}
+        events = Counter()
+        for m in messages:
+            record = self.evidence.inspect(who, m.uid)
+            if not m.read:
+                pending.append(m.uid)
+                if m.ack_required and time.time() - m.ts >= overdue_after_s:
+                    overdue.append(m.uid)
+            if m.acknowledged_at is not None:
+                intervals["acknowledgment"].append(max(0, m.acknowledged_at - m.ts))
+            for kind, label in (("completed", "completion"), ("accepted", "acceptance")):
+                outcome = next((o for o in record["outcomes"] if o["kind"] == kind), None)
+                if outcome:
+                    intervals[label].append(max(0, outcome["ts"] - m.ts))
+            for o in record["outcomes"]:
+                if o["kind"] == "blocked":
+                    reason = o["details"].get("reason", "unspecified")
+                    if isinstance(reason, str):
+                        blockers[" ".join(reason.split()).casefold()] += 1
+                if o["kind"] == "reopened":
+                    reopened.append(m.uid)
+            events.update(e["kind"] for e in record["events"])
+        return {"scope": "messages visible to the caller", "messages": len(messages),
+                "pending": pending, "overdue_unacknowledged": overdue, "overdue_after_s": overdue_after_s,
+                "reopened_messages": sorted(set(reopened)), "blockers": dict(blockers), "events": dict(events),
+                "durations_s": {k: {"samples": len(v), "mean": sum(v) / len(v) if v else None, "max": max(v) if v else None} for k, v in intervals.items()},
+                "definitions": {"pending": "not consumed or explicitly acknowledged", "overdue_unacknowledged": "pending ack-required mail older than the chosen threshold; not proof of failure", "durations": "send to explicit acknowledgment or first recorded completion/acceptance", "blockers": "counts of identical normalized reported reasons; no inferred cause", "delivered": "socket write, not model observation", "offered": "inbox/wait response prepared; not proof of receipt"}}
 
     def propose(self, who, text: str, message_ids: list[str], evidence_refs: list[str],
                 contradicting_message_ids: list[str] | None = None) -> dict:

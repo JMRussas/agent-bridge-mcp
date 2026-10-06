@@ -21,8 +21,8 @@ One process, one port, three surfaces:
 - **`/api/*`** — the same mailbox over plain REST, for an agent that is already
   mid-session and can only reach for `curl`
 
-Thirteen tools in three groups: a mailbox, read-only source access and an
-allowlisted command runner, plus two log tools when the config names log
+Tools cover retained messaging, evidence and coordination, alongside read-only
+source access and an allowlisted command runner, plus two log tools when the config names log
 files.
 
 ## Quick start
@@ -73,10 +73,17 @@ Containment is the design rather than a wrapper: paths are resolved *before*
 they are range-checked against the roots, and the exec allowlist is keyed by
 name so a caller never composes a command line.
 
+The evidence protocol adds conversation/check-in links, exact-artifact outcomes,
+reviewed learning candidates, telemetry, and advisory path leases. An opt-in
+supervised worker can launch a configured harness when mail arrives. See
+[the wire contract](docs/wire.md), [wake-up and recovery](docs/wake.md), and
+[the implementation review](docs/reviews/implementation.md).
+
 ## Architecture
 
-Three UML views, drawn from the source and checked in under
-[docs/diagrams/](docs/diagrams/). Change the code, change the picture.
+Three original UML views of the core transport, checked in under
+[docs/diagrams/](docs/diagrams/). The message sequence illustrates legacy consuming delivery; explicit acknowledgment
+and evidence storage are specified in the wire contract.
 
 **Deployment** — where the bridge sits: one process on the hub machine, three
 surfaces behind one auth middleware, the source roots it is given, local agents

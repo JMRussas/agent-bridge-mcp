@@ -68,3 +68,11 @@ def test_bad_registration_and_relation_are_rejected(evidence):
     m = evidence.box.post("a", "b", "fix")
     with pytest.raises(ValueError):
         evidence.link(A, m.uid, "grants_authority", "conversation", "x")
+
+
+def test_reverse_links_return_only_visible_message_evidence(evidence):
+    visible = evidence.box.post("a", "b", "shared")
+    private = evidence.box.post("c", "c", "private")
+    evidence.link(A, visible.uid, "followed_up_in", "checkin", "checkin:shared")
+    evidence.link(C, private.uid, "followed_up_in", "checkin", "checkin:shared")
+    assert [r["message_id"] for r in evidence.find_links(B, "checkin", "checkin:shared")] == [visible.uid]

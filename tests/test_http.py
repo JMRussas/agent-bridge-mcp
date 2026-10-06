@@ -300,3 +300,33 @@ def test_telemetry_and_reviewed_learning_rest(peered):
     metrics = peered.get("/api/telemetry", headers=AS_PEER).json()["result"]
     assert metrics["messages"] == 1 and metrics["pending"] == [sent["uid"]]
     assert peered.get("/api/telemetry?overdue_after_s=nan", headers=AS_PEER).status_code == 400
+
+
+def test_directory_reports_observed_socket_connection(peered):
+    def own():
+        return next(a for a in peered.get("/api/agents", headers=AS_PEER).json()["agents"] if a["name"] == "sisyphus")
+    assert not own()["listener_connected"]
+    with peered.websocket_connect("/notify?ack=explicit", headers=AS_PEER):
+        assert own()["listener_connected"] and own()["connected_listeners"] == 1
+    assert not own()["listener_connected"]
+
+
+def test_rest_path_lease_conflict_and_owner_boundary(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    cfg = Config({"self_name": "here", "token": TOKEN, "roots": {"repo": str(root)}, "mailbox_store": "", "agents": {"sisyphus": {"token": PEER}, "other": {"token": "other-role"}}, "allowed_hosts": ["testserver:*"]})
+    with TestClient(build(cfg)) as c:
+        session = c.post("/api/sessions", json={"context": {"harness": "test", "conversation_ref": "x"}}, headers=AS_PEER).json()["result"]
+        data = {"session_id": session["id"], "root": "repo", "paths": ["src/File.py"]}
+        lease = c.post("/api/leases", json=data, headers=AS_PEER).json()["result"]
+        conflict = c.post("/api/leases", json={**data, "paths": ["SRC/file.PY"]}, headers=AS_PEER)
+        assert conflict.status_code == 409 and conflict.json()["holders"][0]["id"] == lease["id"]
+        assert c.post("/api/leases", json={"action": "release", "lease_id": lease["id"]}, headers={"Authorization": "Bearer other-role"}).status_code == 403
+        assert c.post("/api/leases", json={"action": "release", "lease_id": lease["id"]}, headers=AS_PEER).status_code == 200
+        assert c.get("/api/leases", headers=AS_PEER).json()["result"] == []
+
+
+@pytest.mark.parametrize("body", [{"to": "x", "text": 1}, {"to": "x", "text": "hi", "ack_required": "false"}, {"to": "x", "text": "hi", "meta": []}])
+def test_malformed_send_never_accepts_a_message(client, body):
+    assert client.post("/api/send", json=body, headers=BEARER).status_code == 400
+    assert client.get("/api/history", headers=BEARER).json()["messages"] == []

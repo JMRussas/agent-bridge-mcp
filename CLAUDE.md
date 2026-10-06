@@ -34,7 +34,12 @@ start is almost always the port already being held — `status` says so.
 src/agent_bridge/
   server.py     FastMCP tools + the WS and REST routes; the only file that knows about HTTP
   auth.py       credential -> Principal (agent name or admin); which mailbox a caller may touch
-  mailbox.py    durable message store + live fan-out
+  mailbox.py    retained SQLite message store + live fan-out
+  evidence.py   sessions, typed links, artifact-specific outcomes
+  reports.py    defined telemetry and reviewed learning candidates
+  leases.py     advisory path reservations
+  runtime.py    durable exclusive worker claims
+  worker.py     opt-in external harness supervisor
   files.py      scoped read/list/grep over the configured roots
   execute.py    allowlisted command runner
   logs.py       named log files under the roots, dated against the build beside them
@@ -80,7 +85,7 @@ reasoning and the alternatives that were rejected.
 - **peer** — prose only: a remote machine. Not a thing in the code.
 
 An **instance** (`agent-a#3f2a`) is one session of a role — the addressing is
-reserved now, delivered in S1b. Instances share their role's credential and
+reserved by authorization; role credentials remain shared. Instances share their role's credential and
 trust; if two things must not read each other's mail, they are two roles.
 
 ## Connecting an agent
@@ -192,8 +197,10 @@ not a wrapper around it:
    private-profile LAN interface.
 5. `.env`, `config.json` and credentials files are on a deny list, and
    `node_modules`/`.git`/`bin`/`obj` are skipped by list, grep and read.
-6. **No tool writes to disk.** The mailbox store is the only file the bridge
-   touches. The one writing tool this ever had took an arbitrary path once,
+6. **No tool writes caller-selected source files.** Messages, sessions, links,
+   outcomes, learning reviews, leases, and worker claims live in the configured
+   SQLite database. The optional worker writes only its configured local state
+   directory and executes the operator-selected harness. The one writing tool this ever had took an arbitrary path once,
    which made a read-only bridge able to overwrite any file the server's user
    could; a future tool that must write gets one configured directory and a
    suffix allowlist, nothing more.
@@ -212,7 +219,7 @@ not a wrapper around it:
 8. **`/api/health` is the only unauthenticated route and says nothing about
    traffic** — `ok`, `self`, and the Host-allowlist diagnostics. Names, unread
    counts and roots are behind auth (`/api/agents`, `bridge_roots`).
-9. **`mailbox.json` is on the deny list**, so a root that contains the bridge's
+9. **Mailbox JSON, SQLite artifacts, and configuration backups are on the deny list**, so a root that contains the bridge's
    own checkout cannot turn `bridge_read` into a way around the mailbox
    boundary.
 
@@ -297,12 +304,16 @@ ranks the vectors and the controls, in the order they are being built.
   of the process holding the socket. Killing the launched PID leaves the port
   bound and the next start dies on bind. `bridge.ps1` kills by **port owner**,
   and records the listener rather than the launcher.
-- **Read-state writes to `mailbox.json` are coalesced (250 ms); posts are not.**
-  A post is written before it returns, because losing one to a kill is a
-  dropped question. Marking messages read only flips flags, happens on every
-  inbox read and every socket frame, and used to rewrite the whole file each
-  time; those now share one timer. A `Stop-Process -Force` inside that window
-  costs one re-delivery, never a message. A clean shutdown flushes.
+- **SQLite retains history; pending limits reject sends.** Configured JSON paths
+  migrate once into sibling SQLite files without changing the originals.
+  Legacy read-state writes remain coalesced (250 ms); explicit acknowledgments
+  and posts commit immediately. Storage and migration failures are explicit.
+- **Legacy delivery consumes, explicit acknowledgment does not.** Use
+  `ack_required=true` on send and `ack_mode=true` / `?ack=explicit` on receive.
+  Acknowledgment accepts responsibility; verification and acceptance are separate
+  evidence-backed outcomes tied to the exact artifact.
+- **Read [docs/wire.md](docs/wire.md) for the full protocol and
+  [docs/wake.md](docs/wake.md) for supervised workers and interrupted-job recovery.**
 - **Stopping the server must poll for the port to free, not sleep.** A
   signalled process holds the socket for a moment longer, so a fixed
   `Start-Sleep` makes `restart` fail intermittently with "already listening".

@@ -78,9 +78,10 @@ class Mailbox:
         self._seen: dict[str, float] = {}
         self._dirty: dict[int, Message] = {}
         self._lock = threading.RLock()
+        self._closed = False
         self._debounce_s = debounce_s
         self._pending: asyncio.TimerHandle | None = None
-        legacy = Path(store) if store and Path(store).suffix == ".json" else None
+        legacy = Path(store) if store and Path(store).suffix.lower() == ".json" else None
         self._store = legacy.with_suffix(".sqlite3") if legacy else (Path(store) if store else None)
         self.db = sqlite3.connect(str(self._store) if self._store else ":memory:",
                                   check_same_thread=False)
@@ -120,17 +121,20 @@ class Mailbox:
     def _rows(self, sql: str, args: tuple = ()) -> list[Message]:
         with self._lock:
             out = [Message(**json.loads(r[0])) for r in self.db.execute(sql, args)]
-            return [self._dirty.get(m.id, m) for m in out]
+            return [self._dirty.get(m.id, m) if not m.read else m for m in out]
 
     def _persist(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             if self._pending is not None:
                 self._pending.cancel()
                 self._pending = None
             with self.db:
                 for m in self._dirty.values():
-                    self.db.execute("UPDATE messages SET read=?,payload=? WHERE id=?", (int(m.read), json.dumps(asdict(m)), m.id))
-                    self._event(m.id, "consumed", m.to, {"mode": "legacy"})
+                    changed = self.db.execute("UPDATE messages SET read=?,payload=? WHERE id=? AND read=0", (int(m.read), json.dumps(asdict(m)), m.id)).rowcount
+                    if changed:
+                        self._event(m.id, "consumed", m.to, {"mode": "legacy"})
                 self.db.execute("INSERT INTO settings VALUES ('seen', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(self._seen),))
             self._dirty.clear()
 
@@ -144,9 +148,11 @@ class Mailbox:
             self._pending = loop.call_later(self._debounce_s, self._persist)
 
     def close(self) -> None:
-        self._persist()
-        # Objects may still be inspected by embedded clients after shutdown.
-        # sqlite connections are released when their owning Mailbox is released.
+        with self._lock:
+            if not self._closed:
+                self._persist()
+                self.db.close()
+                self._closed = True
 
     @property
     def bytes_used(self) -> int:
@@ -154,6 +160,15 @@ class Mailbox:
 
     def post(self, sender: str, to: str, text: str, thread: str = "", meta: dict | None = None, *, ack_required: bool = False,
              authenticated_principal: str = "", admin: bool = False) -> Message:
+        for label, value in (("sender", sender), ("to", to), ("text", text), ("thread", thread)):
+            if not isinstance(value, str):
+                raise ValueError(f"{label} must be a string")
+        if not isinstance(ack_required, bool):
+            raise ValueError("ack_required must be boolean")
+        if meta is not None and not isinstance(meta, dict):
+            raise ValueError("metadata must be an object")
+        if len(json.dumps(meta or {}, allow_nan=False).encode()) > 16384:
+            raise ValueError("metadata exceeds 16 KiB")
         sender = (sender or "unknown").strip().lower()
         to = (to or "").strip().lower()
         if not to:
@@ -185,7 +200,11 @@ class Mailbox:
         return m
 
     def get(self, reference: str | int) -> Message:
-        rows = self._rows("SELECT payload FROM messages WHERE uid=? OR CAST(id AS TEXT)=?", (str(reference), str(reference)))
+        ref = str(reference)
+        if ref.isdecimal() and len(ref) <= 19 and int(ref) < 2**63:
+            rows = self._rows("SELECT payload FROM messages WHERE id=?", (int(ref),))
+        else:
+            rows = self._rows("SELECT payload FROM messages WHERE uid=?", (ref,))
         if not rows:
             raise ValueError("unknown message")
         return rows[0]
@@ -198,9 +217,10 @@ class Mailbox:
             for m in messages:
                 self._event(m.id, "offered", actor, {"transport": transport})
 
-    def delivered(self, reference: str | int, actor: str, transport: str) -> None:
+    def delivered(self, reference: str | int, actor: str, transport: str, address: str = "") -> None:
         with self._lock, self.db:
-            self._event(self.get(reference).id, "delivered", actor, {"transport": transport})
+            m = self.get(reference)
+            self._event(m.id, "delivered", actor, {"transport": transport, "listener_address": address or actor, "recipient_listener": (address or actor) == m.to})
 
     def acknowledge(self, reference: str | int, principal) -> Message:
         with self._lock:
@@ -209,13 +229,20 @@ class Mailbox:
                 from agent_bridge.auth import Forbidden
                 raise Forbidden("only the recipient or operator may acknowledge this message")
             self._persist()
-            if m.acknowledged_at is None:
-                m.acknowledged_at = time.time()
-                m.read = True
-                with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                # Another server connection may have acknowledged meanwhile.
+                m = self.get(reference)
+                if m.acknowledged_at is None:
+                    m.acknowledged_at = time.time()
+                    m.read = True
                     self.db.execute("UPDATE messages SET read=1,payload=? WHERE id=?", (json.dumps(asdict(m)), m.id))
                     self._event(m.id, "acknowledged", principal.name, {})
-            return m
+                self.db.commit()
+                return m
+            except BaseException:
+                self.db.rollback()
+                raise
 
     def _fanout(self, msg: Message) -> None:
         for q in self._subs.get(msg.to, []) + self._subs.get("*", []):

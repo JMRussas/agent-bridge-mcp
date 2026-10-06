@@ -26,6 +26,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from functools import partial
 import ipaddress
 import logging
 import socket
@@ -48,6 +49,8 @@ from agent_bridge.config import Config
 from agent_bridge.execute import ExecDenied, Runner
 from agent_bridge.evidence import Evidence, bounded
 from agent_bridge.reports import Reports
+from agent_bridge.leases import Leases, LeaseConflict
+from agent_bridge.runtime import Runtime
 from agent_bridge.files import Files, PathDenied
 from agent_bridge.logs import Logs
 from agent_bridge.mailbox import Mailbox
@@ -178,7 +181,9 @@ def build(cfg: Config):
     reports = Reports(evidence)
     files = Files(cfg.roots, int(cfg.max_read_bytes), ripgrep=cfg.ripgrep_path)
     if box._store:
-        files.deny_names.update({box._store.name, box._store.name + "-wal", box._store.name + "-shm"})
+        files.deny_names.update({Path(cfg.mailbox_store).name, Path(cfg.mailbox_store).name + ".tmp", box._store.name, box._store.name + "-wal", box._store.name + "-shm"})
+    leases = Leases(evidence, files)
+    runtime = Runtime(evidence)
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     logs = Logs(cfg.roots, names=cfg.logs["names"], exe_names=cfg.logs["exe_names"],
                 skip_dirs=cfg.logs["skip_dirs"])
@@ -229,6 +234,12 @@ def build(cfg: Config):
     # the operator; names that only ever appeared in traffic (the admin
     # sending as "script", mail addressed to a name nobody holds) are shown
     # too, flagged, so a typo in `to` is visible rather than a silent mailbox.
+    listeners: dict[str, int] = {}
+
+    def connection_state(name):
+        count = sum(n for address, n in listeners.items() if address == name or address.startswith(name + "#"))
+        return {"listener_connected": count > 0, "connected_listeners": count, "connection_evidence": "bridge_websocket"}
+
     def directory() -> list[dict]:
         seen = {m["name"]: m for m in box.mailboxes()}
         out = [{"name": creds.self_name, "credentialed": True, "admin": True,
@@ -237,65 +248,97 @@ def build(cfg: Config):
         for name, spec in sorted(cfg.agents.items()):
             m = seen.pop(name, {})
             out.append({"name": name, "credentialed": True, "admin": False,
-                        "description": spec.get("description", ""), "sessions": evidence.directory(name),
+                        "description": spec.get("description", ""), "sessions": evidence.directory(name), **connection_state(name),
                         "unread": m.get("unread", 0),
                         "last_seen_s_ago": m.get("last_seen_s_ago")})
-        out.extend({**m, "credentialed": False, "admin": False, "description": ""}
+        out.extend({**m, **connection_state(m["name"]), "credentialed": False, "admin": False, "description": ""}
                    for _, m in sorted(seen.items()))
         return out
 
-    def evidence_result(fn, *args, **kwargs) -> dict:
+    async def evidence_result(fn, *args, **kwargs) -> dict:
         try:
-            return {"result": fn(*args, **kwargs)}
-        except (ValueError, Forbidden) as e:
+            return {"result": await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))}
+        except LeaseConflict as e:
+            return {"error": str(e), "holders": e.holders}
+        except (ValueError, Forbidden, PathDenied) as e:
             return {"error": str(e)}
         except (OSError, sqlite3.Error):
             return {"error": "evidence persistence failed"}
 
     @mcp.tool()
-    def bridge_register_session(context: dict) -> dict:
+    async def bridge_register_session(context: dict) -> dict:
         """Register conversation and harness context. Model configuration is reported, not attested."""
-        return evidence_result(evidence.register, caller(), context)
+        return await evidence_result(evidence.register, caller(), context)
 
     @mcp.tool()
-    def bridge_sessions() -> dict:
+    async def bridge_sessions() -> dict:
         """Your role's registered sessions; operator sees all. Registration does not prove liveness."""
-        return evidence_result(evidence.sessions, caller())
+        return await evidence_result(evidence.sessions, caller())
 
     @mcp.tool()
-    def bridge_link(message_id: str, relation: str, target_type: str, target_ref: str, inferred: bool = False) -> dict:
+    async def bridge_link(message_id: str, relation: str, target_type: str, target_ref: str, inferred: bool = False) -> dict:
         """Attach a typed evidence reference. Links never grant access to the target."""
-        return evidence_result(evidence.link, caller(), message_id, relation, target_type, target_ref, inferred)
+        return await evidence_result(evidence.link, caller(), message_id, relation, target_type, target_ref, inferred)
 
     @mcp.tool()
-    def bridge_outcome(message_id: str, kind: str, artifact_ref: str = "", evidence_refs: list[str] | None = None, details: dict | None = None) -> dict:
+    async def bridge_links(target_type: str, target_ref: str) -> dict:
+        """Find your visible messages linked to a conversation, check-in, or artifact reference."""
+        return await evidence_result(evidence.find_links, caller(), target_type, target_ref)
+
+    @mcp.tool()
+    async def bridge_outcome(message_id: str, kind: str, artifact_ref: str = "", evidence_refs: list[str] | None = None, details: dict | None = None) -> dict:
         """Record blocked/completed/verified/accepted/reopened. Verification and acceptance require artifact and evidence references."""
-        return evidence_result(evidence.outcome, caller(), message_id, kind, artifact_ref, evidence_refs, details)
+        return await evidence_result(evidence.outcome, caller(), message_id, kind, artifact_ref, evidence_refs, details)
 
     @mcp.tool()
-    def bridge_evidence(message_id: str) -> dict:
+    async def bridge_evidence(message_id: str) -> dict:
         """Inspect an assignment's retained message, links, outcomes, and delivery events."""
-        return evidence_result(evidence.inspect, caller(), message_id)
+        return await evidence_result(evidence.inspect, caller(), message_id)
 
     @mcp.tool()
-    def bridge_telemetry(overdue_after_s: float = 3600) -> dict:
+    async def bridge_telemetry(overdue_after_s: float = 3600) -> dict:
         """Report pending mail, explicit response durations, repeated reported blockers, and reopenings in your visible traffic."""
-        return evidence_result(reports.telemetry, caller(), overdue_after_s)
+        return await evidence_result(reports.telemetry, caller(), overdue_after_s)
 
     @mcp.tool()
-    def bridge_propose_learning(text: str, message_ids: list[str], evidence_refs: list[str], contradicting_message_ids: list[str] | None = None) -> dict:
+    async def bridge_propose_learning(text: str, message_ids: list[str], evidence_refs: list[str], contradicting_message_ids: list[str] | None = None) -> dict:
         """Propose a candidate learning with retained supporting/contradicting messages and external evidence."""
-        return evidence_result(reports.propose, caller(), text, message_ids, evidence_refs, contradicting_message_ids)
+        return await evidence_result(reports.propose, caller(), text, message_ids, evidence_refs, contradicting_message_ids)
 
     @mcp.tool()
-    def bridge_learnings() -> dict:
+    async def bridge_learnings() -> dict:
         """List learning candidates and reviews whose full message evidence you may access."""
-        return evidence_result(reports.list, caller())
+        return await evidence_result(reports.list, caller())
 
     @mcp.tool()
-    def bridge_review_learning(learning_id: str, status: str, evidence_refs: list[str], note: str = "") -> dict:
+    async def bridge_review_learning(learning_id: str, status: str, evidence_refs: list[str], note: str = "") -> dict:
         """Append an evidence-backed accepted/rejected/needs_revision review without rewriting the candidate."""
-        return evidence_result(reports.review, caller(), learning_id, status, evidence_refs, note)
+        return await evidence_result(reports.review, caller(), learning_id, status, evidence_refs, note)
+
+    @mcp.tool()
+    async def bridge_acquire_lease(session_id: str, root: str, worktree: str, paths: list[str], ttl_s: float = 900) -> dict:
+        """Reserve literal file/directory paths; overlapping claims are refused. Advisory only, no filesystem fencing."""
+        return await evidence_result(leases.acquire, caller(), session_id, root, worktree, paths, ttl_s)
+
+    @mcp.tool()
+    async def bridge_leases() -> dict:
+        """List active shared ownership claims and expiries."""
+        return await evidence_result(leases.list, caller())
+
+    @mcp.tool()
+    async def bridge_renew_lease(lease_id: str, ttl_s: float = 900) -> dict:
+        """Renew an active lease owned by your role; expired leases require reacquisition."""
+        return await evidence_result(leases.change, caller(), lease_id, ttl_s)
+
+    @mcp.tool()
+    async def bridge_release_lease(lease_id: str) -> dict:
+        """Release your role's advisory lease while retaining the record."""
+        return await evidence_result(leases.change, caller(), lease_id)
+
+    @mcp.tool()
+    async def bridge_work_claim(message_id: str, worker_id: str, action: str = "start", data: dict | None = None) -> dict:
+        """Claim supervised harness work exclusively; completed/failed record process outcomes, not acceptance. Interrupted claims require operator reset."""
+        return await evidence_result(runtime.claim, caller(), message_id, worker_id, action, data)
 
     # --- mailbox -----------------------------------------------------------
 
@@ -462,6 +505,7 @@ def build(cfg: Config):
                 "auth": "Offer subprotocols ['bridge', 'bearer.<token>'] (the "
                         "Sec-WebSocket-Protocol header), or send Authorization: "
                         "Bearer if your client can. The token is never in the URL.",
+                "explicit_ack": "Use ?ack=explicit&format=json and POST /api/ack after durable handoff. ack-required messages cannot be consumed by legacy listeners.",
                 "note": "Unread messages are replayed on connect, so subscribing "
                         "late does not miss what prompted you to connect. A frame "
                         "written to this socket under your own name is CONSUMED, "
@@ -473,6 +517,7 @@ def build(cfg: Config):
                                   "'bearer.<token>']}, ...)",
                 "IF THAT IS BLOCKED": "Claude Code's Monitor refuses WebSockets to private-range addresses, which makes /notify unusable across a LAN. Use bridge_wait() instead - it blocks until a message arrives and returns the same latency without a socket.",
             },
+            "rest_routes": [{"path": r.path, "methods": sorted(r.methods)} for r in app.routes if getattr(r, "path", "").startswith("/api/")],
             "rest": {
                 "auth": "Authorization: Bearer <token> header on every route except "
                         "/api/health.",
@@ -618,10 +663,14 @@ def build(cfg: Config):
             "your_address": request.client.host if request.client else "",
         })
 
+    async def api_whoami(request: Request):
+        me = who(request)
+        return JSONResponse({"name": me.name, "admin": me.admin, "bridge_id": box.bridge_id, "api_version": "1.1"})
+
     async def api_send(request: Request):
         me = who(request)
-        body = await request.json()
         try:
+            body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("send body must be an object")
             metadata = dict(bounded(body.get("meta", {})))
@@ -631,7 +680,7 @@ def build(cfg: Config):
                 evidence.session(me, body["session_id"])
                 metadata["session_id"] = body["session_id"]
             msg = box.post(sender_for(me, str(body.get("sender", ""))), body.get("to", ""),
-                           body.get("text", ""), body.get("thread", ""), meta=metadata, ack_required=bool(body.get("ack_required", False)), authenticated_principal=me.name, admin=me.admin)
+                           body.get("text", ""), body.get("thread", ""), meta=metadata, ack_required=body.get("ack_required", False), authenticated_principal=me.name, admin=me.admin)
         except Forbidden as e:
             return FORBIDDEN(e)
         except ValueError as e:
@@ -640,17 +689,44 @@ def build(cfg: Config):
             return JSONResponse({"error": "message persistence failed; send was not accepted"}, status_code=503)
         return JSONResponse({"sent": True, "id": msg.id, "uid": msg.uid, "bridge_id": msg.bridge_id, "ack_required": msg.ack_required, "sender": msg.sender})
 
+    async def api_coordination(request: Request):
+        try:
+            me = who(request)
+            if request.method == "GET":
+                result = leases.list(me)
+            else:
+                body = bounded(await request.json())
+                if request.url.path.endswith("work-claims"):
+                    result = runtime.claim(me, body["message_id"], body["worker_id"], body.get("action", "start"), body.get("data"))
+                elif body.get("action", "acquire") == "acquire":
+                    result = leases.acquire(me, body["session_id"], body["root"], body.get("worktree", "."), body["paths"], body.get("ttl_s", 900))
+                elif body["action"] == "renew":
+                    result = leases.change(me, body["lease_id"], body.get("ttl_s", 900))
+                elif body["action"] == "release":
+                    result = leases.change(me, body["lease_id"])
+                else:
+                    raise ValueError("unknown lease action")
+            return JSONResponse({"result": result})
+        except LeaseConflict as e:
+            return JSONResponse({"error": str(e), "holders": e.holders}, status_code=409)
+        except Forbidden as e:
+            return FORBIDDEN(e)
+        except (ValueError, KeyError, TypeError, PathDenied) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except (OSError, sqlite3.Error):
+            return JSONResponse({"error": "coordination persistence failed"}, status_code=503)
+
     async def api_reports(request: Request):
         try:
             me = who(request)
             if request.method == "GET":
-                result = reports.telemetry(me, float(request.query_params.get("overdue_after_s", 3600))) if request.url.path.endswith("telemetry") else reports.list(me)
+                result = await anyio.to_thread.run_sync(partial(reports.telemetry, me, float(request.query_params.get("overdue_after_s", 3600)))) if request.url.path.endswith("telemetry") else await anyio.to_thread.run_sync(partial(reports.list, me))
             else:
                 body = bounded(await request.json())
                 if request.url.path.endswith("learning-reviews"):
-                    result = reports.review(me, body["learning_id"], body["status"], body["evidence_refs"], body.get("note", ""))
+                    result = await anyio.to_thread.run_sync(partial(reports.review, me, body["learning_id"], body["status"], body["evidence_refs"], body.get("note", "")))
                 else:
-                    result = reports.propose(me, body["text"], body["message_ids"], body["evidence_refs"], body.get("contradicting_message_ids"))
+                    result = await anyio.to_thread.run_sync(partial(reports.propose, me, body["text"], body["message_ids"], body["evidence_refs"], body.get("contradicting_message_ids")))
             return JSONResponse({"result": result})
         except Forbidden as e:
             return FORBIDDEN(e)
@@ -680,7 +756,12 @@ def build(cfg: Config):
 
     async def api_evidence_read(request: Request):
         try:
-            result = evidence.sessions(who(request)) if request.url.path.endswith("sessions") else evidence.inspect(who(request), request.query_params.get("message_id", ""))
+            if request.url.path.endswith("sessions"):
+                result = evidence.sessions(who(request))
+            elif request.url.path.endswith("links"):
+                result = await anyio.to_thread.run_sync(partial(evidence.find_links, who(request), request.query_params.get("target_type", ""), request.query_params.get("target_ref", "")))
+            else:
+                result = evidence.inspect(who(request), request.query_params.get("message_id", ""))
             return JSONResponse({"result": result})
         except Forbidden as e:
             return FORBIDDEN(e)
@@ -688,13 +769,15 @@ def build(cfg: Config):
             return JSONResponse({"error": str(e)}, status_code=400)
 
     async def api_ack(request: Request):
-        body = await request.json()
         try:
+            body = bounded(await request.json())
             return JSONResponse({"message": box.acknowledge(str(body.get("message_id", "")), who(request)).as_dict()})
         except Forbidden as e:
             return FORBIDDEN(e)
         except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=404)
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except (OSError, sqlite3.Error):
+            return JSONResponse({"error": "acknowledgment persistence failed"}, status_code=503)
 
     async def api_history(request: Request):
         q = request.query_params
@@ -715,7 +798,11 @@ def build(cfg: Config):
             agent = creds.mailbox_for(who(request), q.get("agent", ""))
         except Forbidden as e:
             return FORBIDDEN(e)
-        msgs = box.inbox(agent, int(q.get("limit", 20)), peek, q.get("thread", ""))
+        try:
+            limit = int(q.get("limit", 20))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        msgs = box.inbox(agent, limit, peek, q.get("thread", ""))
         box.offered(msgs, who(request).name, "rest_inbox")
         return JSONResponse({"agent": agent, "count": len(msgs),
                              "messages": [m.as_dict() for m in msgs]})
@@ -763,6 +850,7 @@ def build(cfg: Config):
         offered = _subprotocols(ws)
         await ws.accept(subprotocol=WS_PROTOCOL if WS_PROTOCOL in offered else None)
         q = box.subscribe(agent)
+        listeners[agent] = listeners.get(agent, 0) + 1
 
         # Anything already waiting is replayed first, so connecting late does not
         # mean missing the message that prompted someone to connect.
@@ -781,7 +869,7 @@ def build(cfg: Config):
         try:
             for m in backlog:
                 await ws.send_text(frame(m, pending=True))
-                box.delivered(m.id, me.name, "websocket")
+                box.delivered(m.id, me.name, "websocket", agent)
                 sent.append(m)
             if not explicit:
                 box.mark_read(*sent)
@@ -799,13 +887,14 @@ def build(cfg: Config):
             while True:
                 m = await q.get()
                 await ws.send_text(frame(m))
-                box.delivered(m.id, me.name, "websocket")
+                box.delivered(m.id, me.name, "websocket", agent)
                 if m.to == agent and not explicit:
                     box.mark_read(m)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
             box.unsubscribe(agent, q)
+            listeners[agent] = max(0, listeners.get(agent, 1) - 1)
 
     app = mcp.streamable_http_app()
 
@@ -824,20 +913,25 @@ def build(cfg: Config):
 
     app.router.lifespan_context = lifespan
 
+    app.state.leases = leases
+    app.state.runtime = runtime
     app.state.reports = reports
     app.state.evidence = evidence
     app.state.mailbox = box
     app.state.mcp = mcp                      # so a test can list what got registered
+    app.routes.append(Route("/api/leases", api_coordination, methods=["GET", "POST"]))
+    app.routes.append(Route("/api/work-claims", api_coordination, methods=["POST"]))
     for path in ("telemetry", "learnings"):
         app.routes.append(Route("/api/" + path, api_reports, methods=["GET"]))
     for path in ("learnings", "learning-reviews"):
         app.routes.append(Route("/api/" + path, api_reports, methods=["POST"]))
     for path in ("sessions", "links", "outcomes"):
         app.routes.append(Route("/api/" + path, api_evidence_write, methods=["POST"]))
-    for path in ("sessions", "evidence"):
+    for path in ("sessions", "evidence", "links"):
         app.routes.append(Route("/api/" + path, api_evidence_read, methods=["GET"]))
     app.routes.append(WebSocketRoute("/notify", notify))
     app.routes.append(Route("/api/health", health, methods=["GET"]))
+    app.routes.append(Route("/api/whoami", api_whoami, methods=["GET"]))
     app.routes.append(Route("/api/send", api_send, methods=["POST"]))
     app.routes.append(Route("/api/ack", api_ack, methods=["POST"]))
     app.routes.append(Route("/api/history", api_history, methods=["GET"]))

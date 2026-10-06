@@ -833,3 +833,38 @@ def test_ack_survives_restart_and_stale_delivery_cannot_erase_it(tmp_path):
     again = Mailbox(store=store)
     assert again.get(stale.uid).acknowledged_at == acknowledged.acknowledged_at
     assert again.inbox("b") == []
+
+
+async def test_delayed_legacy_read_cannot_erase_another_connections_ack(tmp_path):
+    from agent_bridge.auth import Principal
+    store = tmp_path / "concurrent.sqlite3"
+    first = Mailbox(store=store, debounce_s=30)
+    message = first.post("a", "b", "legacy message")
+    first.inbox("b")
+    second = Mailbox(store=store)
+    ack = second.acknowledge(message.uid, Principal("b", False))
+    first.close()
+    assert Mailbox(store=store).get(message.uid).acknowledged_at == ack.acknowledged_at
+
+
+def test_concurrent_acknowledgment_has_one_timestamp_and_event(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from agent_bridge.auth import Principal
+    store = tmp_path / "ack.sqlite3"
+    a = Mailbox(store=store)
+    m = a.post("a", "b", "assignment", ack_required=True)
+    b = Mailbox(store=store)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda box: box.acknowledge(m.uid, Principal("b", False)), [a, b]))
+    assert results[0].acknowledged_at == results[1].acknowledged_at
+    assert a.db.execute("SELECT count(*) FROM events WHERE kind='acknowledged'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("filename", ["mailbox.sqlite3", "mailbox.sqlite3-wal", "worker.sqlite3", "config.json.bridge-backup-20261006"])
+def test_evidence_files_are_not_source_files(tmp_path, filename):
+    (tmp_path / filename).write_text("private evidence")
+    files = Files({"root": tmp_path})
+    with pytest.raises(PathDenied):
+        files.resolve("root:" + filename)
+    assert files.list()["files"] == []
+    assert files._grep_python("private", [tmp_path], "", 10, 0, False)["matches"] == []
