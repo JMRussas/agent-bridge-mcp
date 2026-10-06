@@ -10,3 +10,7 @@ server.pid
 mailbox.json
 mailbox.json.tmp
 out/
+
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

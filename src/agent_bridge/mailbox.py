@@ -23,7 +23,9 @@
 
 import asyncio
 import json
-import os
+import sqlite3
+import uuid
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -40,6 +42,9 @@ class Message:
     read: bool = False
     meta: dict = field(default_factory=dict)
 
+    uid: str = ""
+    bridge_id: str = ""
+
     def as_dict(self) -> dict:
         d = asdict(self)
         d["age_s"] = round(time.time() - self.ts, 1)
@@ -54,79 +59,74 @@ def _size(text: str) -> int:
 
 
 class Mailbox:
-    # Persisted to disk, because "durable" has to mean durable against the
-    # process ending, not merely against a recipient being busy. Holding the
-    # queue in memory alone was wrong in the most ordinary way possible: this
-    # server is restarted every time a tool is added to it, and each restart
-    # silently discarded an unread question and every answer nobody had polled
-    # for yet. A mailbox that loses mail when its process exits is a buffer.
+    # History is retained independently of pending-delivery limits. JSON paths
+    # migrate once into a sibling SQLite file; the original remains untouched.
     def __init__(self, capacity: int = 200, store: str | Path | None = None,
                  max_message_bytes: int = 64 * 1024, max_bytes: int = 4 * 1024 * 1024,
                  debounce_s: float = 0.25):
-        if max_message_bytes <= 0 or max_bytes < max_message_bytes:
-            raise ValueError(
-                f"mailbox_max_bytes ({max_bytes}) must be at least max_message_bytes "
-                f"({max_message_bytes}), or one post evicts every other message"
-            )
+        if capacity <= 0 or max_message_bytes <= 0 or max_bytes < max_message_bytes:
+            raise ValueError("capacity must be positive and max_bytes must be at least max_message_bytes")
         self._capacity = capacity
         self._max_message_bytes = max_message_bytes
         self._max_bytes = max_bytes
-        self._messages: list[Message] = []
-        self._next_id = 1
-        self._seen: dict[str, float] = {}
-        # agent name -> queues. One agent may have several sessions listening.
         self._subs: dict[str, list[asyncio.Queue]] = {}
-        self._store = Path(store) if store else None
-        # Read-state writes are coalesced (see _persist_soon); this is the
-        # pending timer, and the delay.
+        self._seen: dict[str, float] = {}
+        self._dirty: dict[int, Message] = {}
+        self._lock = threading.RLock()
         self._debounce_s = debounce_s
         self._pending: asyncio.TimerHandle | None = None
-        self._load()
+        legacy = Path(store) if store and Path(store).suffix == ".json" else None
+        self._store = legacy.with_suffix(".sqlite3") if legacy else (Path(store) if store else None)
+        self.db = sqlite3.connect(str(self._store) if self._store else ":memory:",
+                                  check_same_thread=False)
+        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
+        with self.db:
+            self.db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT UNIQUE NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, thread TEXT NOT NULL, ts REAL NOT NULL, read INTEGER NOT NULL, payload TEXT NOT NULL)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient,read,id)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread,id)")
+            self.db.execute("INSERT OR IGNORE INTO settings VALUES ('bridge_id', ?)", (str(uuid.uuid4()),))
+        self.bridge_id = self.db.execute("SELECT value FROM settings WHERE key='bridge_id'").fetchone()[0]
+        migrated = self.db.execute("SELECT value FROM settings WHERE key='json_migrated'").fetchone()
+        if legacy and legacy.exists() and not migrated:
+            # Fail closed: malformed history must never become an empty mailbox.
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            with self.db:
+                for raw in data.get("messages", []):
+                    row = dict(raw)
+                    row.pop("age_s", None)
+                    row.setdefault("uid", str(uuid.uuid4()))
+                    row.setdefault("bridge_id", self.bridge_id)
+                    m = Message(**row)
+                    self._insert(m)
+                self.db.execute("INSERT INTO settings VALUES ('seen', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(data.get("seen", {})),))
+                self.db.execute("INSERT INTO settings VALUES ('json_migrated', '1')")
+        seen = self.db.execute("SELECT value FROM settings WHERE key='seen'").fetchone()
+        self._seen = json.loads(seen[0]) if seen else {}
 
-    # --- persistence --------------------------------------------------------
+    def _insert(self, m: Message) -> None:
+        self.db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?)",
+                        (m.id or None, m.uid, m.sender, m.to, m.thread, m.ts, int(m.read), json.dumps(asdict(m))))
 
-    def _load(self) -> None:
-        if not self._store or not self._store.exists():
-            return
-        try:
-            data = json.loads(self._store.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return                                  # a corrupt store is not fatal
-        for row in data.get("messages", []):
-            row.pop("age_s", None)
-            try:
-                self._messages.append(Message(**row))
-            except TypeError:
-                continue
-        self._seen = data.get("seen", {})
-        self._next_id = max((m.id for m in self._messages), default=0) + 1
+    def _rows(self, sql: str, args: tuple = ()) -> list[Message]:
+        with self._lock:
+            out = [Message(**json.loads(r[0])) for r in self.db.execute(sql, args)]
+            return [self._dirty.get(m.id, m) for m in out]
 
     def _persist(self) -> None:
-        if self._pending is not None:
-            self._pending.cancel()
-            self._pending = None
-        if not self._store:
-            return
-        payload = {"messages": [asdict(m) for m in self._messages], "seen": self._seen}
-        tmp = self._store.with_suffix(self._store.suffix + ".tmp")
-        try:
-            # Write-then-replace: a crash mid-write must not leave a truncated
-            # store that _load then silently discards.
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(tmp, self._store)
-        except OSError:
-            pass
+        with self._lock:
+            if self._pending is not None:
+                self._pending.cancel()
+                self._pending = None
+            with self.db:
+                for m in self._dirty.values():
+                    self.db.execute("UPDATE messages SET read=?,payload=? WHERE id=?", (int(m.read), json.dumps(asdict(m)), m.id))
+                self.db.execute("INSERT INTO settings VALUES ('seen', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(self._seen),))
+            self._dirty.clear()
 
-    # Two kinds of write. A post ADDS data and is written at once: losing one
-    # to a kill inside a debounce window is a dropped question, the exact
-    # failure this store exists to prevent. A read-state change only flips a
-    # flag, happens on every inbox() and every socket frame, and rewrote the
-    # whole file each time; losing one costs a single re-delivery. Those are
-    # coalesced onto a short timer. Outside an event loop (tests, tools) they
-    # write immediately, so the behaviour is only ever "at least as durable".
     def _persist_soon(self) -> None:
-        if not self._store:
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -135,17 +135,14 @@ class Mailbox:
         if self._pending is None:
             self._pending = loop.call_later(self._debounce_s, self._persist)
 
-    # Flush anything pending. Wired to the app's shutdown, and safe to call
-    # any time.
     def close(self) -> None:
-        if self._pending is not None:
-            self._persist()
+        self._persist()
+        # Objects may still be inspected by embedded clients after shutdown.
+        # sqlite connections are released when their owning Mailbox is released.
 
     @property
     def bytes_used(self) -> int:
-        return sum(_size(m.text) for m in self._messages)
-
-    # --- writing ---
+        return sum(_size(m.text) for m in self.history(limit=2147483647))
 
     def post(self, sender: str, to: str, text: str, thread: str = "", meta: dict | None = None) -> Message:
         sender = (sender or "unknown").strip().lower()
@@ -156,37 +153,24 @@ class Mailbox:
             raise ValueError("'text' is empty")
         size = _size(text)
         if size > self._max_message_bytes:
-            raise ValueError(
-                f"message is {size} bytes; the limit is {self._max_message_bytes}. "
-                "Put the bulk in a file under a root and send its path instead."
-            )
+            raise ValueError(f"message is {size} bytes; the limit is {self._max_message_bytes}. Put the bulk in a file and send its path instead.")
         for label, value in (("sender", sender), ("to", to), ("thread", thread)):
             if len(value) > 200:
                 raise ValueError(f"'{label}' is longer than 200 characters")
-
-        msg = Message(id=self._next_id, ts=time.time(), sender=sender, to=to,
-                      text=text, thread=thread, meta=meta or {})
-        self._next_id += 1
-        self._messages.append(msg)
-        self._seen[sender] = msg.ts
-        self._evict()
-
-        self._persist()
-        self._fanout(msg)
-        return msg
-
-    # Oldest-first eviction by count AND by bytes, and only messages already
-    # read - an unread message aging out would be a silently dropped question.
-    # Only when every message is unread does the oldest go regardless, because
-    # the alternative is a store that grows without bound.
-    def _evict(self) -> None:
-        while len(self._messages) > self._capacity or self.bytes_used > self._max_bytes:
-            if len(self._messages) <= 1:
-                return
-            victim = next((m for m in self._messages if m.read), None)
-            if victim is None:
-                victim = self._messages[0]
-            self._messages.remove(victim)
+        with self._lock:
+            self._persist()
+            pending = self._rows("SELECT payload FROM messages WHERE read=0")
+            if len(pending) >= self._capacity or sum(_size(m.text) for m in pending) + size > self._max_bytes:
+                raise ValueError("pending mailbox capacity exceeded; acknowledge pending mail before sending more")
+            m = Message(id=0, ts=time.time(), sender=sender, to=to, text=text,
+                        thread=thread, meta=meta or {}, uid=str(uuid.uuid4()), bridge_id=self.bridge_id)
+            with self.db:
+                self._insert(m)
+                m.id = self.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                self.db.execute("UPDATE messages SET payload=? WHERE id=?", (json.dumps(asdict(m)), m.id))
+            self._seen[sender] = m.ts
+        self._fanout(m)
+        return m
 
     def _fanout(self, msg: Message) -> None:
         for q in self._subs.get(msg.to, []) + self._subs.get("*", []):
@@ -202,33 +186,28 @@ class Mailbox:
     def inbox(self, agent: str, limit: int = 20, peek: bool = False, thread: str = "") -> list[Message]:
         agent = (agent or "").strip().lower()
         self._seen[agent] = time.time()
-        out = [m for m in self._messages
-               if m.to == agent and not m.read and (not thread or m.thread == thread)]
-        out = out[:limit]
+        out = self._rows("SELECT payload FROM messages WHERE recipient=? AND read=0 AND (?='' OR thread=?) ORDER BY id", (agent, thread, thread))
+        out = [m for m in out if not m.read][:max(0, min(limit, 1000))]
         if not peek:
-            for m in out:
-                m.read = True
-            # Read state has to survive too, or a restart re-delivers everything
-            # the peer already answered.
-            self._persist_soon()
+            self.mark_read(*out)
         return out
 
     def history(self, agent: str = "", limit: int = 50, thread: str = "") -> list[Message]:
-        out = [m for m in self._messages
-               if (not agent or m.to == agent or m.sender == agent)
-               and (not thread or m.thread == thread)]
-        return out[-limit:]
+        out = self._rows("SELECT payload FROM messages WHERE (?='' OR recipient=? OR sender=?) AND (?='' OR thread=?) ORDER BY id DESC LIMIT ?", (agent, agent, agent, thread, thread, max(0, limit)))
+        return out[::-1]
 
     def unread_count(self, agent: str) -> int:
         agent = (agent or "").strip().lower()
-        return sum(1 for m in self._messages if m.to == agent and not m.read)
+        with self._lock:
+            count = self.db.execute("SELECT count(*) FROM messages WHERE recipient=? AND read=0", (agent,)).fetchone()[0]
+            return count - sum(1 for m in self._dirty.values() if m.to == agent and m.read)
 
     # Every name that has appeared in traffic or listened, with what waits
     # for it. Activity, not configuration: server.py merges this with the
     # configured agents into the directory bridge_agents returns.
     def mailboxes(self) -> list[dict]:
         now = time.time()
-        names = set(self._seen) | {m.sender for m in self._messages} | {m.to for m in self._messages}
+        names = set(self._seen) | {r[0] for r in self.db.execute("SELECT sender FROM messages UNION SELECT recipient FROM messages")}
         return sorted(
             ({"name": n,
               "unread": self.unread_count(n),
@@ -280,6 +259,7 @@ class Mailbox:
     def mark_read(self, *msgs: Message) -> None:
         for m in msgs:
             m.read = True
+            self._dirty[m.id] = m
         if msgs:
             self._persist_soon()
 

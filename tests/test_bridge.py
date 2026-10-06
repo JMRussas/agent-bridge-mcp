@@ -265,16 +265,16 @@ def test_an_oversize_message_is_refused():
         box.post("a", "b", "\u4e2d" * 34)                # 102 bytes
 
 
-def test_retention_is_by_bytes_as_well_as_count():
+def test_history_is_retained_after_pending_bytes_are_released():
     box = Mailbox(capacity=1000, max_bytes=1000, max_message_bytes=500)
     for i in range(3):
-        box.post("a", "b", f"{i}" + "x" * 299)          # 900 bytes, under the cap
-    box.inbox("b")                                       # 0, 1, 2 read
-    box.post("a", "b", "3" + "x" * 299)                  # 1200: evict oldest READ (0)
-    box.post("a", "b", "4" + "x" * 299)                  # 1200: evict oldest READ (1)
-    assert box.bytes_used == 900
-    assert [m.text[0] for m in box.history()] == ["2", "3", "4"]
-    assert box.unread_count("b") == 2                    # 3 and 4 untouched
+        box.post("a", "b", f"{i}" + "x" * 299)
+    box.inbox("b")
+    box.post("a", "b", "3" + "x" * 299)
+    box.post("a", "b", "4" + "x" * 299)
+    assert box.bytes_used == 1500
+    assert [m.text[0] for m in box.history()] == ["0", "1", "2", "3", "4"]
+    assert box.unread_count("b") == 2
 
 
 def test_a_byte_cap_below_one_message_is_refused():
@@ -292,12 +292,12 @@ def test_a_stored_surrogate_does_not_poison_later_posts(tmp_path):
     assert again.unread_count("b") == 2
 
 
-def test_the_last_unread_message_is_never_evicted():
+def test_pending_capacity_refuses_new_mail_without_losing_old_mail():
     box = Mailbox(capacity=1000, max_bytes=500, max_message_bytes=500)
-    box.post("a", "b", "1" + "z" * 399)
-    box.post("a", "b", "2" + "z" * 399)                  # 800 > 500, both unread
-    # With nothing read, the oldest goes - but never the one just posted.
-    assert [m.text[0] for m in box.history()] == ["2"]
+    first = box.post("a", "b", "1" + "z" * 399)
+    with pytest.raises(ValueError, match="capacity exceeded"):
+        box.post("a", "b", "2" + "z" * 399)
+    assert box.history() == [first]
     assert box.unread_count("b") == 1
 
 
@@ -638,11 +638,12 @@ def test_ids_do_not_restart_at_one(tmp_path):
     assert b.post("x", "y", "two").id > first
 
 
-def test_a_corrupt_store_does_not_take_the_server_down(tmp_path):
+def test_a_corrupt_store_fails_closed(tmp_path):
     store = tmp_path / "mailbox.json"
     store.write_text("{not json at all")
-    box = Mailbox(store=store)                     # must not raise
-    assert box.post("x", "y", "still works").id == 1
+    with pytest.raises(ValueError):
+        Mailbox(store=store)
+    assert store.read_text() == "{not json at all"
 
 
 def test_memory_only_is_still_supported(tmp_path):
@@ -781,3 +782,41 @@ async def test_ripgrep_path_is_awaited(tree):
     res = await Files({"proj": root}).grep("MaxSize")
     assert res["engine"] == "ripgrep"
     assert res["count"] == 1 and "node_modules" not in res["matches"][0]
+
+
+def test_json_migration_preserves_ids_and_only_runs_once(tmp_path):
+    import json
+    store = tmp_path / "mailbox.json"
+    original = json.dumps({"messages": [{"id": 236, "ts": 1.0, "sender": "a", "to": "b", "text": "evidence", "read": True}], "seen": {"a": 1.0}})
+    store.write_text(original)
+    box = Mailbox(store=store)
+    first = box.history()[0]
+    assert first.id == 236 and first.read and first.uid
+    later = box.post("a", "b", "new")
+    again = Mailbox(store=store)
+    assert len(again.history()) == 2
+    assert again.bridge_id == first.bridge_id == later.bridge_id
+    assert again.history()[0].uid == first.uid
+    assert later.id == 237
+    assert store.read_text() == original
+
+
+def test_failed_transaction_never_publishes_or_keeps_message(tmp_path):
+    import sqlite3
+    box = Mailbox(store=tmp_path / "mail.sqlite3")
+    queue = box.subscribe("b")
+    box.db.execute("CREATE TRIGGER refuse_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'simulated storage failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="storage failure"):
+        box.post("a", "b", "must not appear")
+    assert box.history() == []
+    assert queue.empty()
+
+
+def test_count_limit_never_removes_pending_mail():
+    box = Mailbox(capacity=1)
+    first = box.post("a", "b", "first")
+    with pytest.raises(ValueError, match="capacity exceeded"):
+        box.post("a", "b", "second")
+    box.inbox("b")
+    box.post("a", "b", "second")
+    assert box.history()[0].uid == first.uid

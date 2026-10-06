@@ -29,6 +29,7 @@ from contextlib import asynccontextmanager
 import ipaddress
 import logging
 import socket
+import sqlite3
 from pathlib import Path
 
 import anyio
@@ -171,6 +172,8 @@ def build(cfg: Config):
                   max_bytes=int(cfg.mailbox_max_bytes),
                   debounce_s=float(cfg.mailbox_debounce_s))
     files = Files(cfg.roots, int(cfg.max_read_bytes), ripgrep=cfg.ripgrep_path)
+    if box._store:
+        files.deny_names.update({box._store.name, box._store.name + "-wal", box._store.name + "-shm"})
     runner = Runner(cfg.commands, cfg.roots, cfg.exec_enabled, cfg.exec_timeout)
     logs = Logs(cfg.roots, names=cfg.logs["names"], exe_names=cfg.logs["exe_names"],
                 skip_dirs=cfg.logs["skip_dirs"])
@@ -272,6 +275,8 @@ def build(cfg: Config):
             msg = box.post(sender_for(me, sender), to, text, thread)
         except ValueError as e:
             return {"error": str(e)}
+        except (OSError, sqlite3.Error):
+            return {"error": "message persistence failed; send was not accepted"}
         return {"sent": True, "id": msg.id, "to": msg.to, "sender": msg.sender,
                 "queued_for_recipient": box.unread_count(msg.to)}
 
@@ -543,6 +548,8 @@ def build(cfg: Config):
                            body.get("text", ""), body.get("thread", ""))
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
+        except (OSError, sqlite3.Error):
+            return JSONResponse({"error": "message persistence failed; send was not accepted"}, status_code=503)
         return JSONResponse({"sent": True, "id": msg.id, "sender": msg.sender})
 
     async def api_inbox(request: Request):

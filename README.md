@@ -54,12 +54,16 @@ from "wrong token" in one step.
 
 ## Design notes
 
-The mailbox is **durable first, pushed second**. An agent mid-turn cannot
-service a socket, so every message is queued before it is offered to whatever
-happens to be listening; a listener that is absent, slow or dead loses nothing
-and reads the same message on its next turn. Push only ever improves latency —
-it is never the system of record. Unread messages are also exempt from capacity
-eviction, so an unanswered question cannot be aged out by unrelated chatter.
+The mailbox commits messages to SQLite before offering live delivery. Existing
+`mailbox.json` stores migrate once to `mailbox.sqlite3`; the JSON original is
+retained. Message UUIDs and the persistent bridge ID complement legacy integer
+IDs. History is retained; `inbox_max` and `mailbox_max_bytes` now limit pending
+mail only. A full pending queue rejects new sends instead of deleting evidence.
+Storage and migration failures are explicit errors.
+
+Legacy inbox reads and successful `/notify` writes still consume mail. A socket
+write proves transport delivery, not model observation. Use history to recover
+context; explicit acknowledgment mode is introduced in the next protocol stage.
 
 Containment is the design rather than a wrapper: paths are resolved *before*
 they are range-checked against the roots, and the exec allowlist is keyed by
