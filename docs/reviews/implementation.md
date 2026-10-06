@@ -44,3 +44,22 @@ Tests cover reconnect replay, legacy consumer protection, restart, idempotence,
 and cross-role denial. Delivery events mean socket writes, not model observation;
 consumed events retain the legacy semantics. Acknowledgment means responsibility,
 not completion, verification, or acceptance.
+
+## Step 3: sessions, links, and outcomes
+
+Role-owned sessions record harness/conversation and optional repository/worktree,
+branch/commit, model configuration, and claimed source. Registration never attests
+a model or liveness. Directory discovery exposes limited harness/model metadata;
+full conversation context remains role-private. Sends may reference an authorized
+session and include bounded, untrusted metadata.
+
+Messages support many-to-many typed links to conversations, sessions, check-ins,
+assignments, commits, artifacts, and other authorized messages. Each link records
+actor, timestamp, and whether inferred. References do not fetch targets or grant
+permission. Outcomes are append-only claims with explicit artifact/evidence refs.
+Acceptance requires the authenticated assigner/operator and the currently verified
+artifact; reopening or subsequent changes require fresh verification.
+
+Review fixed metadata session spoofing and acceptance of stale or different
+artifacts. Unit and REST tests cover the assignment-to-review flow, role boundaries,
+restart persistence, malformed registration, and exact-artifact acceptance.

@@ -270,3 +270,21 @@ def test_provenance_distinguishes_operator_impersonation(peered):
     assert rows[0]["admin"] and rows[0]["impersonated"]
     assert rows[1]["sender"] == rows[1]["authenticated_principal"] == "sisyphus"
     assert not rows[1]["admin"] and not rows[1]["impersonated"]
+
+
+def test_rest_session_and_evidence_flow(peered):
+    session = peered.post("/api/sessions", json={"context": {"harness": "test", "conversation_ref": "conversation:private", "configured_model": "reported"}}, headers=AS_PEER).json()["result"]
+    sent = peered.post("/api/send", json={"to": "sisyphus", "text": "fix", "ack_required": True}, headers=BEARER).json()
+    assert peered.post("/api/links", json={"message_id": sent["uid"], "relation": "followed_up_in", "target_type": "session", "target_ref": session["id"]}, headers=AS_PEER).status_code == 200
+    assert peered.post("/api/outcomes", json={"message_id": sent["uid"], "kind": "verified", "artifact_ref": "commit:abc", "evidence_refs": ["test:123"]}, headers=AS_PEER).status_code == 200
+    assert peered.post("/api/outcomes", json={"message_id": sent["uid"], "kind": "accepted", "artifact_ref": "commit:abc", "evidence_refs": ["review:456"]}, headers=AS_PEER).status_code == 403
+    assert peered.post("/api/outcomes", json={"message_id": sent["uid"], "kind": "accepted", "artifact_ref": "commit:abc", "evidence_refs": ["review:456"]}, headers=BEARER).status_code == 200
+    result = peered.get("/api/evidence", params={"message_id": sent["uid"]}, headers=AS_PEER).json()["result"]
+    assert len(result["links"]) == 1 and result["outcomes"][-1]["kind"] == "accepted"
+    assert peered.get("/api/sessions", headers=AS_PEER).json()["result"][0]["id"] == session["id"]
+
+
+def test_session_reference_cannot_be_spoofed_in_metadata(peered):
+    session = peered.post("/api/sessions", json={"context": {"harness": "test", "conversation_ref": "operator:private"}}, headers=BEARER).json()["result"]
+    assert peered.post("/api/send", json={"to": "x", "text": "hi", "session_id": session["id"]}, headers=AS_PEER).status_code == 403
+    assert peered.post("/api/send", json={"to": "x", "text": "hi", "meta": {"session_id": session["id"]}}, headers=AS_PEER).status_code == 400

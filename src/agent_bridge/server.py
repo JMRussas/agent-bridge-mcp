@@ -46,6 +46,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from agent_bridge.auth import PLACEHOLDER_TOKENS, Credentials, Forbidden, Principal
 from agent_bridge.config import Config
 from agent_bridge.execute import ExecDenied, Runner
+from agent_bridge.evidence import Evidence, bounded
 from agent_bridge.files import Files, PathDenied
 from agent_bridge.logs import Logs
 from agent_bridge.mailbox import Mailbox
@@ -172,6 +173,7 @@ def build(cfg: Config):
                   max_message_bytes=int(cfg.max_message_bytes),
                   max_bytes=int(cfg.mailbox_max_bytes),
                   debounce_s=float(cfg.mailbox_debounce_s))
+    evidence = Evidence(box)
     files = Files(cfg.roots, int(cfg.max_read_bytes), ripgrep=cfg.ripgrep_path)
     if box._store:
         files.deny_names.update({box._store.name, box._store.name + "-wal", box._store.name + "-shm"})
@@ -233,12 +235,45 @@ def build(cfg: Config):
         for name, spec in sorted(cfg.agents.items()):
             m = seen.pop(name, {})
             out.append({"name": name, "credentialed": True, "admin": False,
-                        "description": spec.get("description", ""),
+                        "description": spec.get("description", ""), "sessions": evidence.directory(name),
                         "unread": m.get("unread", 0),
                         "last_seen_s_ago": m.get("last_seen_s_ago")})
         out.extend({**m, "credentialed": False, "admin": False, "description": ""}
                    for _, m in sorted(seen.items()))
         return out
+
+    def evidence_result(fn, *args, **kwargs) -> dict:
+        try:
+            return {"result": fn(*args, **kwargs)}
+        except (ValueError, Forbidden) as e:
+            return {"error": str(e)}
+        except (OSError, sqlite3.Error):
+            return {"error": "evidence persistence failed"}
+
+    @mcp.tool()
+    def bridge_register_session(context: dict) -> dict:
+        """Register conversation and harness context. Model configuration is reported, not attested."""
+        return evidence_result(evidence.register, caller(), context)
+
+    @mcp.tool()
+    def bridge_sessions() -> dict:
+        """Your role's registered sessions; operator sees all. Registration does not prove liveness."""
+        return evidence_result(evidence.sessions, caller())
+
+    @mcp.tool()
+    def bridge_link(message_id: str, relation: str, target_type: str, target_ref: str, inferred: bool = False) -> dict:
+        """Attach a typed evidence reference. Links never grant access to the target."""
+        return evidence_result(evidence.link, caller(), message_id, relation, target_type, target_ref, inferred)
+
+    @mcp.tool()
+    def bridge_outcome(message_id: str, kind: str, artifact_ref: str = "", evidence_refs: list[str] | None = None, details: dict | None = None) -> dict:
+        """Record blocked/completed/verified/accepted/reopened. Verification and acceptance require artifact and evidence references."""
+        return evidence_result(evidence.outcome, caller(), message_id, kind, artifact_ref, evidence_refs, details)
+
+    @mcp.tool()
+    def bridge_evidence(message_id: str) -> dict:
+        """Inspect an assignment's retained message, links, outcomes, and delivery events."""
+        return evidence_result(evidence.inspect, caller(), message_id)
 
     # --- mailbox -----------------------------------------------------------
 
@@ -252,7 +287,7 @@ def build(cfg: Config):
             "exec_enabled": cfg.exec_enabled,
             "commands": sorted(cfg.commands),
             "grep_engine": files.engine(),
-            "agents": directory(),
+            "agents": directory(), "sessions": evidence.sessions(caller()),
         }
 
     # The sender is whoever authenticated. An agent cannot claim another
@@ -262,7 +297,7 @@ def build(cfg: Config):
         return (claimed.strip() or me.name) if me.admin else me.name
 
     @mcp.tool()
-    def bridge_send(to: str, text: str, sender: str = "", thread: str = "", ack_required: bool = False) -> dict:
+    def bridge_send(to: str, text: str, sender: str = "", thread: str = "", ack_required: bool = False, session_id: str = "", meta: dict | None = None) -> dict:
         """Send a message to an agent on another machine.
 
         Delivered live to any listener and queued durably, so it is read even if
@@ -273,8 +308,14 @@ def build(cfg: Config):
         """
         me = caller()
         try:
-            msg = box.post(sender_for(me, sender), to, text, thread, ack_required=ack_required, authenticated_principal=me.name, admin=me.admin)
-        except ValueError as e:
+            metadata = dict(bounded({} if meta is None else meta))
+            if "session_id" in metadata:
+                raise ValueError("use the session_id argument, not metadata")
+            if session_id:
+                evidence.session(me, session_id)
+                metadata["session_id"] = session_id
+            msg = box.post(sender_for(me, sender), to, text, thread, meta=metadata, ack_required=ack_required, authenticated_principal=me.name, admin=me.admin)
+        except (ValueError, Forbidden) as e:
             return {"error": str(e)}
         except (OSError, sqlite3.Error):
             return {"error": "message persistence failed; send was not accepted"}
@@ -557,13 +598,51 @@ def build(cfg: Config):
         me = who(request)
         body = await request.json()
         try:
+            if not isinstance(body, dict):
+                raise ValueError("send body must be an object")
+            metadata = dict(bounded(body.get("meta", {})))
+            if "session_id" in metadata:
+                raise ValueError("use the session_id argument, not metadata")
+            if body.get("session_id"):
+                evidence.session(me, body["session_id"])
+                metadata["session_id"] = body["session_id"]
             msg = box.post(sender_for(me, str(body.get("sender", ""))), body.get("to", ""),
-                           body.get("text", ""), body.get("thread", ""), ack_required=bool(body.get("ack_required", False)), authenticated_principal=me.name, admin=me.admin)
+                           body.get("text", ""), body.get("thread", ""), meta=metadata, ack_required=bool(body.get("ack_required", False)), authenticated_principal=me.name, admin=me.admin)
+        except Forbidden as e:
+            return FORBIDDEN(e)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         except (OSError, sqlite3.Error):
             return JSONResponse({"error": "message persistence failed; send was not accepted"}, status_code=503)
         return JSONResponse({"sent": True, "id": msg.id, "uid": msg.uid, "bridge_id": msg.bridge_id, "ack_required": msg.ack_required, "sender": msg.sender})
+
+    async def api_evidence_write(request: Request):
+        try:
+            body = bounded(await request.json())
+            me = who(request)
+            route = request.url.path.rsplit("/", 1)[-1]
+            if route == "sessions":
+                result = evidence.register(me, body["context"])
+            elif route == "links":
+                result = evidence.link(me, body["message_id"], body["relation"], body["target_type"], body["target_ref"], body.get("inferred", False))
+            else:
+                result = evidence.outcome(me, body["message_id"], body["kind"], body.get("artifact_ref", ""), body.get("evidence_refs"), body.get("details"))
+            return JSONResponse({"result": result})
+        except Forbidden as e:
+            return FORBIDDEN(e)
+        except (ValueError, KeyError, TypeError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except (OSError, sqlite3.Error):
+            return JSONResponse({"error": "evidence persistence failed"}, status_code=503)
+
+    async def api_evidence_read(request: Request):
+        try:
+            result = evidence.sessions(who(request)) if request.url.path.endswith("sessions") else evidence.inspect(who(request), request.query_params.get("message_id", ""))
+            return JSONResponse({"result": result})
+        except Forbidden as e:
+            return FORBIDDEN(e)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
 
     async def api_ack(request: Request):
         body = await request.json()
@@ -700,7 +779,13 @@ def build(cfg: Config):
 
     app.router.lifespan_context = lifespan
 
+    app.state.evidence = evidence
+    app.state.mailbox = box
     app.state.mcp = mcp                      # so a test can list what got registered
+    for path in ("sessions", "links", "outcomes"):
+        app.routes.append(Route("/api/" + path, api_evidence_write, methods=["POST"]))
+    for path in ("sessions", "evidence"):
+        app.routes.append(Route("/api/" + path, api_evidence_read, methods=["GET"]))
     app.routes.append(WebSocketRoute("/notify", notify))
     app.routes.append(Route("/api/health", health, methods=["GET"]))
     app.routes.append(Route("/api/send", api_send, methods=["POST"]))
