@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.hygiene
+
 REPO = Path(__file__).resolve().parents[1]
 CRLF_SUFFIXES = {".ps1", ".psm1", ".bat", ".cmd"}      # .gitattributes: eol=crlf
 BINARY_SUFFIXES = {".png", ".rgba", ".exe", ".dll", ".pyc"}

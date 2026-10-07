@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.reports
+
 from agent_bridge.auth import Forbidden, Principal
 from agent_bridge.evidence import Evidence
 from agent_bridge.mailbox import Mailbox

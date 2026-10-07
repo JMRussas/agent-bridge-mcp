@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.cli
+
 from agent_bridge.cli import main
 from agent_bridge.config import Config
 from agent_bridge.server import refuse_open_bind

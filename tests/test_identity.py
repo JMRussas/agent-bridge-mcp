@@ -15,6 +15,8 @@ import threading
 
 import httpx
 import pytest
+
+pytestmark = pytest.mark.mcp
 import uvicorn
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client

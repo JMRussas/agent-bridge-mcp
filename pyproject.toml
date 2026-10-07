@@ -32,6 +32,19 @@ dev = [
 where = ["src"]
 
 [tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+testpaths = ["tests"]
+markers = [
+    "core: source access, search, execution, logs, and mailbox primitives",
+    "cli: configuration and operator commands",
+    "http: REST and WebSocket behavior and authorization",
+    "mcp: real MCP transport, identity, and responsiveness",
+    "evidence: retained messages, sessions, links, and assignment outcomes",
+    "leases: ownership conflicts, resolved paths, and worker claims",
+    "reports: telemetry and evidence-backed learning reviews",
+    "worker: subprocess supervision, recovery, and durable acknowledgment",
+    "hygiene: tracked repository line-ending policy",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # Warnings are errors, so a leaked handle or a bad escape fails the build

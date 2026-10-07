@@ -28,8 +28,7 @@ files.
 ## Quick start
 
 ```powershell
-uv venv .venv
-uv pip install --python .venv\Scripts\python.exe -e .
+uv sync --locked
 .venv\Scripts\agent-bridge init             # writes config.json with the admin token
                                           # then add your roots to it
 tools\bridge.ps1 start
@@ -110,8 +109,47 @@ for prompt injection, which is the threat this design is actually about.
 ## Tests
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests\ -q
+tools\test.ps1
+tools\test.ps1 -Group 'worker or leases'
+tools\test.ps1 -Group http -Name ack
+tools\test.ps1 -CollectOnly
 ```
+
+The runner uses `uv run --locked --extra dev`: `.python-version` pins the test
+interpreter and `uv.lock` pins direct and transitive dependencies. A missing or
+outdated lockfile fails instead of silently resolving a different environment.
+`uv` installs the pinned interpreter when needed. On Windows the runner uses
+ripgrep from PATH or the installed Codex VS Code extension and fails explicitly
+if neither is available. Install `uv.exe` on PATH and keep `.EXE` in Windows
+`PATHEXT`; the runner fails explicitly if either prerequisite is missing.
+The directory-alias test uses a junction when Windows
+does not grant symbolic-link privileges. No live bridge or credentials are needed.
+
+Select tests by purpose with `-Group` (pytest marker expressions), by name with
+`-Name`, or preview the selection with `-CollectOnly`. These filters combine.
+
+| Group | Coverage |
+| --- | --- |
+| `core` | Source access, search, command execution, logs, mailbox primitives |
+| `cli` | Configuration and operator commands |
+| `http` | REST, WebSocket, authorization |
+| `mcp` | Real MCP transport, identity, responsiveness |
+| `evidence` | Persistence, sessions, links, assignment outcomes |
+| `leases` | Ownership, path aliases, exclusive worker claims |
+| `reports` | Telemetry and reviewed learnings |
+| `worker` | Real subprocesses, recovery, durable acknowledgment |
+| `hygiene` | Repository line endings |
+
+Give new test modules an explicit `pytestmark = pytest.mark.<group>` and register
+new groups in `pyproject.toml` and `tests/conftest.py`. Unknown marker names,
+missing groups, or multiple purpose groups fail collection. To update
+dependencies deliberately, run `uv lock`, rerun the full suite, and review the
+lockfile diff. Keep `.python-version`, `uv.lock`, and the test changes together.
+
+The equivalent command on other platforms is
+`uv run --locked --extra dev python -m pytest -q -ra`; add `-m 'worker or leases'`
+or `-k ack` to select tests. Install ripgrep on PATH first. Platform-specific
+coverage differs: the Windows environment-name test is skipped on other systems.
 
 ## License
 

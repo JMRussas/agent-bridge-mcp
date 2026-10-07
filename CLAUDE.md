@@ -22,8 +22,8 @@ survives only as a worked example in [docs/examples/](docs/examples/).
 | Status | `tools\bridge.ps1 status` |
 | Stop / restart | `tools\bridge.ps1 stop` / `restart` |
 | Open the LAN port | `tools\bridge.ps1 firewall` (**elevated shell**) |
-| Tests | `.venv\Scripts\python.exe -m pytest tests\ -q` (warnings are errors) |
-| Install | `uv venv .venv; uv pip install --python .venv\Scripts\python.exe -e .[dev]` |
+| Tests | `tools\test.ps1` (locked dependencies, warnings as errors); `-Group mcp` selects MCP tests |
+| Install | `uv sync --locked --extra dev` (interpreter pinned by `.python-version`) |
 
 Logs are `server.log` / `server.err` next to `config.json`. A silent failure to
 start is almost always the port already being held — `status` says so.

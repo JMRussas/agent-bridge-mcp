@@ -8,6 +8,8 @@
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.http
 from starlette.testclient import TestClient, WebSocketDenialResponse
 
 from agent_bridge.config import Config

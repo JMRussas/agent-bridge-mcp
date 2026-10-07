@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.core
+
 from agent_bridge.execute import ExecDenied, Runner, child_env
 from agent_bridge.files import Files, PathDenied
 from agent_bridge.mailbox import Mailbox

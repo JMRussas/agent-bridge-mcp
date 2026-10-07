@@ -1,7 +1,11 @@
+import os
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+pytestmark = pytest.mark.leases
 
 from agent_bridge.auth import Forbidden, Principal
 from agent_bridge.evidence import Evidence
@@ -47,13 +51,22 @@ def test_overlaps_case_renewal_release_and_expiry(setup, monkeypatch):
     leases.acquire(A, sa, "repo", ".", ["src"])
 
 
-def test_symlink_alias_and_invalid_paths(setup):
+def test_directory_alias_and_invalid_paths(setup):
     evidence, leases, sa, sb, root = setup
     (root / "actual").mkdir()
     try:
         (root / "alias").symlink_to(root / "actual", target_is_directory=True)
-    except OSError:
-        pytest.skip("host does not permit symlinks")
+    except OSError as exc:
+        if os.name != "nt" or exc.winerror != 1314:
+            raise
+        # Directory junctions exercise resolved aliases on Windows without
+        # requiring the symlink privilege or changing machine-wide settings.
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J",
+             str(root / "alias"), str(root / "actual")],
+            check=True, capture_output=True, timeout=10,
+        )
+    assert (root / "alias").resolve() == (root / "actual").resolve()
     leases.acquire(A, sa, "repo", ".", ["actual/file"])
     with pytest.raises(LeaseConflict):
         leases.acquire(B, sb, "repo", ".", ["alias/file"])

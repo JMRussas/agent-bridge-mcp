@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.worker
 from starlette.testclient import TestClient
 
 from agent_bridge.config import Config
