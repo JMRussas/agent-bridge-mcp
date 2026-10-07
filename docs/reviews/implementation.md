@@ -154,3 +154,14 @@ venv was isolated from the existing Windows installation. Both runs exercised
 real launcher subprocesses and HTTP/stdio MCP. The Windows runner now rejects a
 missing `.EXE` in `PATHEXT`, which otherwise lets PowerShell launch `uv` without
 waiting for its result. Whitespace and staged dependency-lock checks passed.
+
+
+## October 7 CI follow-up
+
+The test workflow runs on Windows and Linux for pushes, pull requests, and manual
+invocations. It pins checkout/setup-uv action revisions and uv 0.11.19, uses the
+locked dependencies and pinned Python, installs ripgrep on both platforms, and
+runs the Windows test script directly. Jobs use read-only repository permissions,
+a 15-minute timeout, and no bridge credentials. P5 remains partially complete
+because linting and static type checking are not yet configured. Local platform
+runs above are distinct from the hosted Actions results reported after pushing.

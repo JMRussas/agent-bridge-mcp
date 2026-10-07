@@ -222,6 +222,12 @@ The equivalent command on other platforms is
 or `-k ack` to select tests. Install ripgrep on PATH first. Platform-specific
 coverage differs: the Windows environment-name test is skipped on other systems.
 
+[GitHub Actions](.github/workflows/tests.yml) runs the locked suite on Windows
+and Linux for pushes and pull requests; it also supports manual runs. Both jobs
+install ripgrep, and the Windows job uses `tools/test.ps1`. The workflow pins the
+action revisions and uv version and needs no bridge credentials or live service.
+Linting and static type checking remain follow-up work in roadmap P5.
+
 ## License
 
 MIT

@@ -314,9 +314,10 @@ not what it is.
   example that starts it and a `SessionStart` snippet that drains the inbox.
   Removes the "hand-roll curl" step from the receiving side.
 
-- [ ] **P5 CI** (S)
-  GitHub Actions: pytest on Windows + Linux, ruff, mypy on `src/`. Pin
-  dependencies with a lock file.
+- [~] **P5 CI** (S) — locked Windows/Linux pytest workflow added October 7.
+  `.github/workflows/tests.yml` runs on pushes and pull requests, using pinned
+  action revisions and uv, with ripgrep installed on both platforms. Dependencies
+  and the test interpreter are pinned. Ruff and mypy on `src/` remain outstanding.
 
 - [ ] **P6 versioned wire surface** (S) — *the contract everything else
   builds against.*
