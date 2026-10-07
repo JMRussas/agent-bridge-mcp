@@ -1,5 +1,16 @@
 # agent-bridge-mcp roadmap
 
+## October 7 local startup and repeatable tests
+
+The [local stdio launcher](../README.md#on-demand-startup-for-local-agents) exposes
+health, idempotent startup, tool discovery, and role-authenticated tool forwarding.
+It remains callable when the HTTP bridge is stopped. Bridge startup and
+[supervised harness wake-up](wake.md) are separate operations.
+
+Tests use a pinned interpreter, `uv.lock`, explicit purpose markers, and the
+Windows `tools/test.ps1` runner. The [validation record](reviews/implementation.md)
+keeps this milestone separate from the October 6 implementation review.
+
 ## October 6 reliability and evidence update
 
 The implementation in [wire.md](wire.md) and [wake.md](wake.md) adds retained

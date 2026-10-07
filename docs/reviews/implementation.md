@@ -123,3 +123,34 @@ Final validation: 194 tests passed, 3 skipped (ripgrep unavailable on the Window
 PATH and Windows symlink creation unavailable). Python compilation, worker CLI
 help, and diff whitespace checks passed. Each stage was reviewed, corrected, and
 committed separately; no external publication or production rollout is included.
+
+
+## October 7 follow-up: repeatable tests and local launcher
+
+The test environment now pins Python in `.python-version` and dependencies in
+`uv.lock`. Every test has exactly one purpose marker; the Windows runner supports
+purpose and name filters, discovers ripgrep, and exercises directory aliases with
+a junction when symlink creation lacks permission.
+
+A separate stdio MCP launcher provides `bridge_status`, `bridge_ensure_running`,
+`bridge_tools`, and `bridge_call`. It starts the local HTTP bridge on demand and
+forwards with an existing role credential. It refuses unhealthy services and
+occupied ports, serializes competing starts, and preserves upstream tool errors.
+It never automatically retries an upstream call with uncertain effects.
+
+Initial follow-up validation: 204 Windows tests passed with no skips, including
+real subprocess startup, concurrent reuse, crash recovery, stdio discovery while
+the bridge is down, and role isolation through the HTTP transport. A read-only
+live smoke check reused the existing bridge and discovered its 29 tools through
+the launcher. Windows and WSL Codex registrations were updated locally; those
+machine-specific settings and credentials are outside this repository.
+The October 6 totals above remain the record for that earlier milestone.
+
+
+Pre-push platform validation on October 7: the full locked suite passed on
+Windows through `tools/test.ps1` (204 passed) and on Linux/WSL with Python 3.12.11
+(203 passed, one expected Windows-only environment-name test skipped). The Linux
+venv was isolated from the existing Windows installation. Both runs exercised
+real launcher subprocesses and HTTP/stdio MCP. The Windows runner now rejects a
+missing `.EXE` in `PATHEXT`, which otherwise lets PowerShell launch `uv` without
+waiting for its result. Whitespace and staged dependency-lock checks passed.

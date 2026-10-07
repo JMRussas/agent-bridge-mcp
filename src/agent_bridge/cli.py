@@ -217,6 +217,11 @@ def cmd_serve(args) -> int:
     return serve(args.config, args.host, args.port)
 
 
+def cmd_launcher(args) -> int:
+    from agent_bridge.launcher import run
+    return run(str(Path(args.config or default_config_path()).resolve()), args.agent)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agent-bridge")
     ap.add_argument("--config", default=None, help="path to config.json")
@@ -232,6 +237,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--host", default=None)
     s.add_argument("--port", type=int, default=None)
     s.set_defaults(fn=cmd_serve)
+
+    launch = sub.add_parser("launcher", help="local stdio MCP: start and use the bridge on demand")
+    add_config(launch)
+    launch.add_argument("--agent", required=True, help="existing agent role (never the admin credential)")
+    launch.set_defaults(fn=cmd_launcher)
 
     i = sub.add_parser("init", help="write a config.json with a generated token")
     add_config(i)
@@ -257,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
 
     argv = sys.argv[1:] if argv is None else argv
     # No subcommand (the old spelling, and what bridge.ps1 runs) means serve.
-    if not any(a in ("serve", "init", "token", "agent", "-h", "--help") for a in argv):
+    if not any(a in ("serve", "launcher", "init", "token", "agent", "-h", "--help") for a in argv):
         argv = ["serve", *argv]
     args = ap.parse_args(argv)
     return args.fn(args)

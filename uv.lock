@@ -13,6 +13,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "regex" },
     { name = "uvicorn" },
@@ -21,7 +22,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "httpx2" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -30,7 +30,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.5" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = "==0.28.1" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.13" },
     { name = "mcp", specifier = "==1.26.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.0.2" },

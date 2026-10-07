@@ -44,6 +44,16 @@ form `worker://<worker-id>/<message-uid>`; their local log is `<uid>.log` alongs
 `worker.sqlite3`. These artifacts contain private conversation content and should
 live outside exposed source roots. No background service is installed automatically.
 
+## Starting the bridge itself
+
+The worker above needs an available HTTP bridge. Local agents can register the
+[stdio launcher](../README.md#on-demand-startup-for-local-agents) and call
+`bridge_ensure_running` to start that service. `bridge_tools` and `bridge_call`
+also ensure it is running before discovery or forwarding. The launcher does not
+start a worker, deliver input into an idle IDE, or run a model turn by itself.
+A remote HTTP client needs a launcher on the bridge host or an OS-managed service;
+it cannot call a startup tool through a stopped HTTP endpoint.
+
 ## Recover an interrupted launch
 
 1. Inspect the recorded claim/events and local worker state. Stop any old harness

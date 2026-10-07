@@ -19,6 +19,7 @@ survives only as a worked example in [docs/examples/](docs/examples/).
 | Give an agent its credential | `.venv\Scripts\agent-bridge agent add agent-a --description "Claude Code in /path/to/repo-a" [--local]` (prints its registration for Claude Code and Codex) |
 | List / show / remove agents | `agent-bridge agent list` / `agent show <name>` / `agent remove <name>` |
 | Start | `tools\bridge.ps1 start` |
+| Local MCP launcher | `agent-bridge launcher --config <absolute-config-path> --agent <existing-role>`; register as stdio MCP ([setup](README.md#on-demand-startup-for-local-agents)) |
 | Status | `tools\bridge.ps1 status` |
 | Stop / restart | `tools\bridge.ps1 stop` / `restart` |
 | Open the LAN port | `tools\bridge.ps1 firewall` (**elevated shell**) |
@@ -32,7 +33,8 @@ start is almost always the port already being held — `status` says so.
 
 ```
 src/agent_bridge/
-  server.py     FastMCP tools + the WS and REST routes; the only file that knows about HTTP
+  server.py     FastMCP tools + the WS and REST routes
+  launcher.py   local stdio MCP; starts the HTTP bridge and forwards role-authenticated calls
   auth.py       credential -> Principal (agent name or admin); which mailbox a caller may touch
   mailbox.py    retained SQLite message store + live fan-out
   evidence.py   sessions, typed links, artifact-specific outcomes
@@ -45,8 +47,10 @@ src/agent_bridge/
   logs.py       named log files under the roots, dated against the build beside them
   patterns.py   caller-supplied regexes, with a deadline
   config.py     config.json loader
-  cli.py        init / token / agent / serve
+  cli.py        init / token / agent / serve / launcher
 tools/bridge.ps1  start/stop/status/firewall
+tools/test.ps1    locked Windows test runner with purpose/name filters
+uv.lock           pinned runtime and test dependencies
 docs/diagrams/    deployment, class and sequence diagrams (SVG); embedded in README
 docs/examples/    the setup this was first built for, as a worked example
 config.json       machine-specific, gitignored — holds the token
@@ -65,6 +69,23 @@ One process, one port (**8791**), three ways in:
 `/api` is **not** redundant with `/mcp`. A Claude Code session cannot gain a new
 MCP server without restarting, so the agent on this machine would otherwise be
 unable to answer a message until the next session. `curl` always works.
+
+## Local startup tools
+
+The separately registered stdio launcher is available while the HTTP bridge is
+stopped. `bridge_status` checks health without starting it; `bridge_ensure_running`
+starts or reuses it; `bridge_tools` returns the upstream tool schemas; and
+`bridge_call(name, arguments)` forwards calls. Discovery and forwarding also start
+the bridge when needed. Begin with `bridge_capabilities` through `bridge_call`.
+
+Run the launcher on the bridge's OS with an absolute config path and an existing
+agent role. It reads that role's credential locally and never forwards as admin.
+Startup is serialized across launcher processes; credential or occupied-port
+failures require operator correction. Calls are not automatically retried after
+an ambiguous network failure. The detached bridge stays up when the client exits.
+Stop/restart remains an operator action. See [the README](README.md#on-demand-startup-for-local-agents)
+for registration, recovery, and WSL details; [wake-up](docs/wake.md) describes the
+separate worker that launches a harness when assigned mail arrives.
 
 ## Vocabulary
 

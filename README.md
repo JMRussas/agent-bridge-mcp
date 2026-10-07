@@ -51,6 +51,77 @@ not for an agent.
 `curl http://<host>:8791/api/health` needs no token and separates "firewall"
 from "wrong token" in one step.
 
+## On-demand startup for local agents
+
+Register the **local stdio launcher** alongside the HTTP bridge. Because the MCP
+client launches it directly, its tools remain available even when the HTTP
+bridge is stopped. It starts the bridge as a detached process, then forwards
+calls using the selected agent's credential.
+
+Use an existing role from `agent-bridge agent list`, or create one with
+`agent-bridge agent add NAME --local` first. If you add a role to an already
+running bridge, restart that bridge once to load the credential.
+
+For Codex, add this to the user's `~/.codex/config.toml`, adjusting the absolute
+paths and role:
+
+```toml
+[mcp_servers.agent_bridge_launcher]
+command = 'D:\Git\agent-bridge-mcp\.venv\Scripts\python.exe'
+args = ["-m", "agent_bridge", "launcher", "--config", 'D:\Git\agent-bridge-mcp\config.json', "--agent", "YOUR-AGENT-ROLE"]
+startup_timeout_sec = 20
+tool_timeout_sec = 360
+```
+
+These are the standard [Codex stdio MCP settings](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+For a Linux or macOS bridge, use that installation's absolute Python and config
+paths. From WSL, to manage a Windows bridge, use `/mnt/d/.../python.exe` as the
+command and the Windows config path in the arguments. Run the launcher on the
+same OS as the bridge so configured source paths resolve correctly.
+
+Any stdio MCP client can use the same executable and argument array. Reload the
+client's MCP connections after registration. No token is placed in the launcher
+registration; the local process reads the chosen role from the bridge config.
+This is a trusted local operator interface: access to that config already grants
+access to its credentials. Do not expose the launcher as an unauthenticated
+network service.
+
+| Launcher tool | Purpose |
+| --- | --- |
+| `bridge_status()` | Health, agent identity, and connection state; does not start anything |
+| `bridge_ensure_running()` | Start if stopped, or reuse a healthy bridge; safe to repeat |
+| `bridge_tools()` | Discover existing tools with descriptions and JSON input schemas; starts if needed |
+| `bridge_call(name, arguments)` | Call any discovered tool with the configured agent identity; starts if needed |
+
+Agent workflow:
+
+1. Call `bridge_ensure_running()` and `bridge_tools()`.
+2. Call `bridge_call("bridge_capabilities", {})`, then `bridge_whoami` and
+   `bridge_agents` through `bridge_call` to learn the bridge and available peers.
+3. Use `bridge_send`, `bridge_inbox`, `bridge_wait`, `bridge_history`, and
+   `bridge_ack` for messaging. Prefer explicit acknowledgments for assignments.
+4. Discover source access with `bridge_roots`, `bridge_list`, `bridge_read`, and
+   `bridge_grep`; inspect `bridge_commands` before using `bridge_run`.
+5. Use session, lease, and evidence tools when coordinating work or recording
+   results. Every upstream tool remains subject to the HTTP bridge's permissions.
+
+The launcher serializes startup across local callers and checks health and
+identity before returning success. A wrong credential, occupied port, or unhealthy
+service produces an error instead of killing or replacing a process. Logs append
+to `server.log` and `server.err` beside the config. The child runs from that same
+directory, which anchors relative mailbox paths. Keep your normal service wrapper
+on that working directory too. Reload the launcher after config/token changes.
+
+The bridge remains running when the MCP client exits. Stop/restart and firewall
+changes remain operator actions via `tools/bridge.ps1`; they are deliberately not
+agent tools. Failed upstream calls are never retried automatically, since a lost
+response may follow a successful send or command. Check retained history before
+retrying a send yourself.
+
+A remote HTTP caller cannot start a stopped bridge through that same stopped
+endpoint. Run the launcher on the bridge host (or keep the bridge under an OS
+service) for remote availability.
+
 ## Design notes
 
 The mailbox commits messages to SQLite before offering live delivery. Existing
