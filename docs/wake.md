@@ -69,9 +69,24 @@ The local lock prevents concurrent use of one directory. Completed jobs are neve
 reexecuted solely because acknowledgment failed. Exactly-once external side effects
 are not promised; explicit recovery must consider partial work from the old run.
 
+## VS Code companion spike
+
+[Agent Bridge Wake](../extensions/bridge-wake/README.md) adds a persistent
+WebSocket listener, notifications, and optional automatic turns in a
+new companion-owned Codex conversation per task. It reuses the bridge's durable claims and
+explicit acknowledgments and keeps uncertain turns pending. A real two-push
+smoke test confirmed separate threads with independent supplied context and
+results recorded against the correct assignments. See the companion README for
+the handoff format, output limits, and recovery behavior.
+An isolated editor-host probe found no public API for submitting into the
+installed Codex or Claude extension's existing chat. The companion is an
+experimental alternative conversation, not an adapter for those open panels.
+
 ## Validation performed
 
 Integration tests use real subprocesses and an isolated authenticated bridge.
 They cover durable output, ack failure/restart, exclusive claims, known failures,
 timeouts, output-storage failure, and Windows local locking. Installed Codex help
-was inspected. No authenticated live model turn or idle IDE wake was tested.
+was inspected. The original worker validation did not run an authenticated model turn or wake an
+idle IDE chat. The later companion smoke test above did run real Codex turns,
+but did not wake an existing IDE chat panel.

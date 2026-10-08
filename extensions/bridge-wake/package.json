@@ -1,0 +1,83 @@
+{
+  "name": "agent-bridge-wake",
+  "displayName": "Agent Bridge Wake",
+  "description": "Listen for bridge mail and start an opted-in Codex conversation per task.",
+  "version": "0.1.0",
+  "publisher": "agent-bridge-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.96.0",
+    "node": ">=20"
+  },
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentBridgeWake.connect",
+        "title": "Agent Bridge: Connect Listener"
+      },
+      {
+        "command": "agentBridgeWake.disconnect",
+        "title": "Agent Bridge: Disconnect Listener"
+      },
+      {
+        "command": "agentBridgeWake.setToken",
+        "title": "Agent Bridge: Set Role Token"
+      },
+      {
+        "command": "agentBridgeWake.enable",
+        "title": "Agent Bridge: Enable Companion Auto-Wake"
+      },
+      {
+        "command": "agentBridgeWake.disable",
+        "title": "Agent Bridge: Disable Companion Auto-Wake"
+      },
+      {
+        "command": "agentBridgeWake.show",
+        "title": "Agent Bridge: Show Wake Transcript"
+      },
+      {
+        "command": "agentBridgeWake.inspect",
+        "title": "Agent Bridge: Inspect Installed Chat Integration"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Bridge Wake",
+      "properties": {
+        "agentBridgeWake.url": {
+          "type": "string",
+          "default": "http://127.0.0.1:8791",
+          "description": "Bridge origin. Uses a role token from VS Code SecretStorage."
+        },
+        "agentBridgeWake.codexExecutable": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute Codex executable path. Empty uses the installed Codex extension binary when available."
+        }
+      }
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JMRussas/agent-bridge-mcp.git",
+    "directory": "extensions/bridge-wake"
+  }
+}

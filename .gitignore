@@ -16,3 +16,7 @@ out/
 *.sqlite3-shm
 config.json.bridge-backup-*
 *.launcher.lock
+
+# Local VS Code companion development artifacts
+node_modules/
+*.vsix

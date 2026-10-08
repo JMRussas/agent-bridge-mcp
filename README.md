@@ -122,6 +122,15 @@ A remote HTTP caller cannot start a stopped bridge through that same stopped
 endpoint. Run the launcher on the bridge host (or keep the bridge under an OS
 service) for remote availability.
 
+## VS Code wake-up experiment
+
+The [companion extension](extensions/bridge-wake/README.md) listens independently
+of model turns and starts a new Codex conversation per acknowledged-work task,
+with a structured context handoff and results attached to the assignment. A real
+two-task test confirmed separate threads and correctly associated results. The
+installed Codex/Claude extensions did not expose an existing-chat submission API;
+this experiment does not wake their already open chat panels.
+
 ## Design notes
 
 The mailbox commits messages to SQLite before offering live delivery. Existing

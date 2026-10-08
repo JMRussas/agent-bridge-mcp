@@ -1,5 +1,15 @@
 # agent-bridge-mcp roadmap
 
+## October 7 editor wake-up feasibility spike
+
+The [VS Code companion](../extensions/bridge-wake/README.md) activates in the
+editor, listens outside model turns, and optionally creates a Codex conversation
+per task. Real pushes used independent context in distinct threads and returned
+results through assignment evidence. Inspection of the
+installed Codex and Claude extensions found no public API for submitting into an
+existing chat panel; that integration remains open. The companion is a prototype
+with conservative recovery, not a replacement for the supervised worker.
+
 ## October 7 local startup and repeatable tests
 
 The [local stdio launcher](../README.md#on-demand-startup-for-local-agents) exposes

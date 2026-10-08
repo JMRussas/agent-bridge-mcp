@@ -165,3 +165,32 @@ runs the Windows test script directly. Jobs use read-only repository permissions
 a 15-minute timeout, and no bridge credentials. P5 remains partially complete
 because linting and static type checking are not yet configured. Local platform
 runs above are distinct from the hosted Actions results reported after pushing.
+
+
+## October 7 VS Code wake-up feasibility result
+
+The local companion in `extensions/bridge-wake` loads in an isolated Windows
+VS Code extension host and resolves the installed Codex binary. Its installed
+VSIX was also activated successfully. Codex extension 26.1002.51308 and Claude
+Code 2.1.292 both activated with no exported integration API; their registered
+commands did not expose sending a turn to a chosen existing conversation.
+The spike therefore does not claim to wake either existing IDE chat panel.
+
+The companion uses Codex app-server stdio and creates a conversation per task.
+Two real messages on an isolated bridge caused model turns in distinct threads,
+with different context and correct results readable by the sender through
+assignment evidence. The task handoff and thread mapping are persisted before
+submission; uncertain work is not automatically retried. Results include bounded
+output in bridge evidence and full output in the local journal.
+Both messages were acknowledged after the response, and the pending inbox was
+empty. No production mailbox was used. The companion defaults to notifications
+only, and optional automatic turns use a read-only sandbox with configured MCP
+servers disabled.
+
+Thirteen account-free companion tests passed on Windows and Linux. They cover real
+WebSocket push/reconnect, duplicate suppression, queued turns, durable-handoff
+ordering, acknowledgment retry, uncertain-turn pausing, and real stdio framing.
+The existing Python Windows suite still passed 204 tests. The CI workflow now
+includes the companion tests; the account-using live smoke and installed-editor
+probe are separate local checks. Source and test instructions are in the
+[companion README](../../extensions/bridge-wake/README.md).
